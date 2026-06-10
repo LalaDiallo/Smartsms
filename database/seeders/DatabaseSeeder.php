@@ -15,24 +15,24 @@ class DatabaseSeeder extends Seeder
             LanguagesSeeder::class,
 
             // ── Clients & Utilisateurs ───────────────────────────────────
-            ClientsSeeder::class,
+            // ClientsSeeder::class,
             UsersSeeder::class,
 
             // ── Abonnements (dépend de ClientsSeeder + migrations plans) ─
-            SubscriptionSeeder::class,
-
+/*            SubscriptionSeeder::class,
+*/
             // ── Contenu métier ───────────────────────────────────────────
             TemplatesSeeder::class,
-            ContactsSeeder::class,
-            CampaignsSeeder::class,
-            MessagesSeeder::class,
-            ResponsesSeeder::class,
+            // ContactsSeeder::class,
+            // CampaignsSeeder::class,
+            // MessagesSeeder::class,
+            // ResponsesSeeder::class,
             EventsSeeder::class,
             OperatorsSeeder::class,
             LoyaltyProgramsSeeder::class,
             SpamRulesSeeder::class,
-            NotificationSeeder::class,
-            BrandingSeeder::class,
+            // NotificationSeeder::class,
+            // BrandingSeeder::class,
         ]);
     }
 }

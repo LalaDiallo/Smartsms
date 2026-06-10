@@ -69,7 +69,7 @@ class Subscription extends Model
         return $query->whereNotNull('end_date')
                      ->whereBetween('end_date', [
                          now(),
-                         now()->addDays($days)
+                         now()->addDays((int) $days)
                      ]);
     }
 

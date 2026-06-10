@@ -17,10 +17,10 @@ class UsersSeeder extends Seeder
         // Créer le super_admin unique
         DB::table('users')->insert([
             'name' => 'Super Admin',
-            'email' => 'superadmin@example.com',
+            'email' => 'admin@smartsms.tech',
             'password' => Hash::make('Password123!'),
             'role' => 'super_admin',
-            'client_id' => 1, // n'est lié à aucune entreprise
+            'client_id' => null, // n'est lié à aucune entreprise
             'status' => 'active',
             'phone' => '+224600000000',
             'email_verified_at' => now(),
@@ -40,7 +40,7 @@ class UsersSeeder extends Seeder
             foreach ($roles as $role) {
                 DB::table('users')->insert([
                     'name' => ucfirst($role) . ' ' . $client->company_name,
-                    'email' => strtolower($role . '.' . str_replace(' ', '', $client->company_name)) . '@example.com',
+                    'email' => strtolower($role . '.' . str_replace(' ', '', $client->company_name)) . 'smartsms.tech',
                     'password' => Hash::make('Password123!'),
                     'role' => $role,
                     'client_id' => $client->id,

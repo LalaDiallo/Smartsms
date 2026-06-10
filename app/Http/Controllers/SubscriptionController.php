@@ -429,13 +429,13 @@ class SubscriptionController extends Controller
                     $currentActive->update(['status' => 'expired']);
 
                     $start  = now();
-                    $end    = now()->addMonths($cycle->months);
+                    $end    = now()->addMonths((int) $cycle->months);
                     $status = 'pending';
                     $queued = false;
                 } else {
                     // Réabonnement avant la fin d'un plan payant → file d'attente
                     $start  = $currentActive->end_date;
-                    $end    = $currentActive->end_date->copy()->addMonths($cycle->months);
+                    $end    = $currentActive->end_date->copy()->addMonths((int) $cycle->months);
                     $status = $isPaid ? 'pending' : 'active';
                     $queued = true;
                 }
@@ -446,7 +446,7 @@ class SubscriptionController extends Controller
                     ->update(['status' => 'expired']);
 
                 $start  = now();
-                $end    = now()->addMonths($cycle->months);
+                $end    = now()->addMonths((int) $cycle->months);
                 $status = $isPaid ? 'pending' : 'active';
                 $queued = false;
             }

@@ -61,7 +61,7 @@ class SubscriptionSeeder extends Seeder
 
             $startDate   = $joinedAt;
             $endDate     = $isActive
-                ? now()->addMonths($cycle->months)
+                ? now()->addMonths((int) $cycle->months)
                 : now()->subDays(rand(5, 30));    // expiré si suspendu/résilié
 
             $smsQuota    = $plan->smsIncludedForCycle($cycle);

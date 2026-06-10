@@ -320,7 +320,7 @@ class PaymentController extends Controller
                 'status'         => 'active',
                 'payment_status' => 'paid',
                 'start_date'     => now(),
-                'end_date'       => now()->addMonths($months),
+                'end_date'       => now()->addMonths((int) $months),
             ]);
 
             // Expirer le Freemium si encore actif — le plan payant prend sa place
@@ -446,7 +446,7 @@ class PaymentController extends Controller
                 'status'         => 'active',
                 'payment_status' => 'paid',
                 'start_date'     => now(),
-                'end_date'       => now()->addMonths($months),
+                'end_date'       => now()->addMonths((int) $months),
             ]);
 
             // Expirer le Freemium si encore actif

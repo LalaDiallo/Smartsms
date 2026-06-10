@@ -4,7 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class contentRules extends Model
+class ContentRules extends Model
 {
     protected $table = 'content_rules';
 
