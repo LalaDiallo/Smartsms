@@ -104,6 +104,9 @@ class RegisterController extends Controller
                 $monthlyCycle   = BillingCycle::where('months', 1)->first();
 
                 if ($freemiumPlan && $monthlyCycle) {
+                    // Les 50 SMS sont offerts pour 1 mois d'essai.
+                    // Après ce mois, le Freemium devient un fallback permanent avec 0 SMS (géré par ExpireSubscriptions).
+                    // Si un plan payant est souscrit avant la fin du mois, les SMS restants sont transférés au plan payant.
                     Subscription::create([
                         'client_id'            => $client->id,
                         'subscription_plan_id' => $freemiumPlan->id,

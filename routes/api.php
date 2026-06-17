@@ -85,6 +85,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/long-term',                 [SubscriptionController::class, 'longTerm']);
         Route::post('/pricing',                  [SubscriptionController::class, 'pricing']);
         Route::post('/subscribe',                [SubscriptionController::class, 'subscribe']);
+        Route::post('/upgrade-preview',          [SubscriptionController::class, 'upgradePreview']);
         Route::get('/current',                   [SubscriptionController::class, 'current']);
         Route::get('/active/{clientId}',         [SubscriptionController::class, 'active']);
         Route::get('/invoices/client/{clientId}',[SubscriptionController::class, 'clientInvoices']);

@@ -315,20 +315,51 @@ class PaymentController extends Controller
         }
 
         if ($status === 'SUCCESS') {
+            // Ne pas réactiver un abonnement déjà annulé ou expiré par l'utilisateur
+            if ($subscription->status !== 'pending') {
+                Log::info('LengoPay callback: SUCCESS ignoré (statut non-pending)', [
+                    'pay_id' => $payId,
+                    'status' => $subscription->status,
+                ]);
+                return response()->json(['received' => true]);
+            }
+
             $months = $subscription->billingCycle?->months ?? 1;
+
+            // SMS restants du Freemium à transférer (uniquement si encore dans la période d'essai d'1 mois)
+            $freemiumBonus = 0;
+            $trialFreemium = Subscription::where('client_id', $subscription->client_id)
+                ->where('status', 'active')
+                ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
+                ->whereNotNull('end_date')
+                ->where('end_date', '>', now())
+                ->first();
+
+            if ($trialFreemium) {
+                $freemiumBonus = max(0, $trialFreemium->sms_quota - $trialFreemium->sms_used);
+            }
+
             $subscription->update([
                 'status'         => 'active',
                 'payment_status' => 'paid',
                 'start_date'     => now(),
                 'end_date'       => now()->addMonths((int) $months),
+                'sms_quota'      => $subscription->sms_quota + $freemiumBonus,
             ]);
 
-            // Expirer le Freemium si encore actif — le plan payant prend sa place
+            if ($freemiumBonus > 0) {
+                Log::info('LengoPay: SMS Freemium transférés', [
+                    'client_id'     => $subscription->client_id,
+                    'sms_transferes' => $freemiumBonus,
+                ]);
+            }
+
+            // Suspendre le Freemium — il reprendra sa place à l'expiration du plan payant
             Subscription::where('client_id', $subscription->client_id)
                 ->where('id', '!=', $subscription->id)
                 ->where('status', 'active')
-                ->whereHas('plan', fn($q) => $q->where('slug', 'freemium')->orWhere('price_monthly_base', 0))
-                ->update(['status' => 'expired']);
+                ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
+                ->update(['status' => 'suspended']);
 
             cache()->forget("subscription:current:{$subscription->client_id}");
 
@@ -433,38 +464,30 @@ class PaymentController extends Controller
             return $this->handleTopupCallback($topup, 'SUCCESS');
         }
 
-        // Chercher une subscription en attente avec ce pay_id
+        // Chercher la subscription liée à ce pay_id (quel que soit son statut)
         $subscription = Subscription::where('payment_ref', $payId)
             ->where('client_id', $user->client_id)
-            ->where('status', 'pending')
             ->with('plan')
             ->first();
 
-        if ($subscription) {
-            $months = $subscription->billingCycle?->months ?? 1;
-            $subscription->update([
-                'status'         => 'active',
-                'payment_status' => 'paid',
-                'start_date'     => now(),
-                'end_date'       => now()->addMonths((int) $months),
-            ]);
-
-            // Expirer le Freemium si encore actif
-            Subscription::where('client_id', $user->client_id)
-                ->where('id', '!=', $subscription->id)
-                ->where('status', 'active')
-                ->whereHas('plan', fn($q) => $q->where('slug', 'freemium')->orWhere('price_monthly_base', 0))
-                ->update(['status' => 'expired']);
-
-            cache()->forget("subscription:current:{$user->client_id}");
-            ActivityLogger::log('subscription.created', ['plan' => $subscription->plan?->name ?? 'Plan'], 'subscription', $subscription->id);
-
+        // Déjà activée par le callback LengoPay → confirmer au frontend
+        if ($subscription && $subscription->status === 'active' && $subscription->payment_status === 'paid') {
             return response()->json([
                 'activated' => true,
                 'type'      => 'subscription',
                 'plan_name' => $subscription->plan?->name,
                 'sms_quota' => $subscription->sms_quota,
             ]);
+        }
+
+        // Annulée ou expirée → ne pas activer
+        if ($subscription && in_array($subscription->status, ['expired', 'cancelled'])) {
+            return response()->json(['activated' => false, 'message' => 'Paiement annulé'], 200);
+        }
+
+        // Toujours en attente de confirmation du callback LengoPay
+        if ($subscription && $subscription->status === 'pending') {
+            return response()->json(['activated' => false, 'message' => 'En attente de confirmation LengoPay'], 200);
         }
 
         // Peut-être déjà activé

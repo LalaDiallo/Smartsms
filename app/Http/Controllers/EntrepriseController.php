@@ -69,6 +69,7 @@ class EntrepriseController extends Controller
 
         // ── 2. Total dépensé = somme de tous les abonnements ─────────────────
         $totalSpent = Subscription::whereIn('client_id', $clientIds)
+            ->where('payment_status', 'paid')
             ->select('client_id', DB::raw('SUM(price) as total'))
             ->groupBy('client_id')
             ->pluck('total', 'client_id');

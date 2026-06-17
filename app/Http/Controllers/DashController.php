@@ -131,7 +131,7 @@ class DashController extends Controller
             ->count();
 
         // ── Chiffre d'affaires total ──────────────────────────────────────────
-        $revenueTotal = (float) Subscription::sum('price');
+        $revenueTotal = (float) Subscription::where('payment_status', 'paid')->sum('price');
 
         // ── Clients récents ───────────────────────────────────────────────────
         $recentClients = Clients::with(['subscriptions' => fn($q) =>

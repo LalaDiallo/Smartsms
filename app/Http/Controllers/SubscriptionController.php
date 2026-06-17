@@ -308,20 +308,21 @@ class SubscriptionController extends Controller
             return response()->json(['subscription' => $cached]);
         }
 
-        // Priorité : active > suspended > pending > dernier plan PAYANT expiré
-        // Le Freemium n'est jamais retourné comme "abonnement courant" après sa période d'essai
+        // Priorité : active > plan payant suspendu > pending > Freemium suspendu (fallback permanent)
         $subscription =
             Subscription::where('client_id', $user->client_id)
                 ->where('status', 'active')
                 ->with('plan')->latest()->first()
             ?? Subscription::where('client_id', $user->client_id)
                 ->where('status', 'suspended')
+                ->whereHas('plan', fn($q) => $q->where('is_freemium', false))
                 ->with('plan')->latest()->first()
             ?? Subscription::where('client_id', $user->client_id)
                 ->where('status', 'pending')
                 ->with('plan')->latest()->first()
             ?? Subscription::where('client_id', $user->client_id)
-                ->whereHas('plan', fn($q) => $q->where('price_monthly_base', '>', 0)) // exclut Freemium
+                ->where('status', 'suspended')
+                ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
                 ->with('plan')->latest()->first();
 
         if (!$subscription) {
@@ -364,6 +365,63 @@ class SubscriptionController extends Controller
     // ─── Souscription & Achat ──────────────────────────────────────────────────
 
     /**
+     * Calcule le montant pro-rata pour un upgrade immédiat (lecture seule, aucune modification).
+     * POST /subscriptions/upgrade-preview
+     */
+    public function upgradePreview(Request $request)
+    {
+        $request->validate([
+            'plan_id' => 'required|string',
+            'period'  => 'nullable|in:quarterly,semiannual,annual',
+        ]);
+
+        /** @var \App\Models\User $user */
+        $user   = Auth::user();
+        $client = $user->client;
+
+        if (!$client) {
+            return response()->json(['message' => 'Client introuvable'], 404);
+        }
+
+        $plan  = $this->resolvePlan($request->plan_id);
+        $cycle = $this->resolveBillingCycle($request->period);
+
+        $newPrice    = $plan->basePriceForCycle($cycle);
+        $newSmsQuota = $plan->smsIncludedForCycle($cycle);
+
+        $currentActive = Subscription::where('client_id', $client->id)
+            ->where('status', 'active')
+            ->whereNotNull('end_date')
+            ->where('end_date', '>', now())
+            ->whereHas('plan', fn($q) => $q->where('is_freemium', false))
+            ->with('plan')
+            ->orderByDesc('end_date')
+            ->first();
+
+        if (!$currentActive) {
+            return response()->json(['upgrade_needed' => false]);
+        }
+
+        $totalDays      = max(1, (int) $currentActive->start_date->diffInDays($currentActive->end_date));
+        $remainingDays  = max(0, (int) now()->diffInDays($currentActive->end_date, false));
+        $remainingValue = (int) round((int) $currentActive->price * ($remainingDays / $totalDays));
+        $proRataDue     = max(0, $newPrice - $remainingValue);
+
+        return response()->json([
+            'upgrade_needed'    => true,
+            'current_plan_name' => $currentActive->plan?->name,
+            'current_end_date'  => $currentActive->end_date->toDateString(),
+            'days_remaining'    => $remainingDays,
+            'remaining_value'   => $remainingValue,
+            'new_plan_name'     => $plan->name,
+            'new_plan_price'    => $newPrice,
+            'new_sms_quota'     => $newSmsQuota,
+            'pro_rata_due'      => $proRataDue,
+            'currency'          => 'GNF',
+        ]);
+    }
+
+    /**
      * Souscription à un plan ou achat de crédits SMS (top-up).
      * POST /subscriptions/subscribe
      *
@@ -374,6 +432,7 @@ class SubscriptionController extends Controller
      *   is_long_term   ?bool    true si engagement long terme
      *   is_topup       ?bool    true pour achat de crédits SMS
      *   sms_count      ?int     quantité SMS pour top-up
+     *   upgrade_mode   ?string  immediate|queued  (si plan payant actif)
      */
     public function subscribe(Request $request)
     {
@@ -384,6 +443,7 @@ class SubscriptionController extends Controller
             'is_long_term'   => 'nullable|boolean',
             'is_topup'       => 'nullable|boolean',
             'sms_count'      => 'nullable|integer|min:1',
+            'upgrade_mode'   => 'nullable|in:immediate,queued',
         ]);
 
         /** @var \App\Models\User $user */
@@ -425,24 +485,53 @@ class SubscriptionController extends Controller
                     || $currentActive->plan?->price_monthly_base == 0;
 
                 if ($isPaid && $isCurrentFreemium) {
-                    // Expirer le Freemium → le nouveau plan démarre maintenant
-                    $currentActive->update(['status' => 'expired']);
+                    // Ne pas expirer le Freemium maintenant — il sera expiré par lengoCallback()
+                    // après confirmation réelle du paiement. Le client garde l'accès pendant l'attente.
+                    // Annuler tout éventuel paiement pending précédent pour éviter les doublons.
+                    Subscription::where('client_id', $client->id)
+                        ->where('status', 'pending')
+                        ->where('payment_status', 'pending')
+                        ->update(['status' => 'expired', 'payment_status' => 'cancelled']);
 
                     $start  = now();
                     $end    = now()->addMonths((int) $cycle->months);
                     $status = 'pending';
                     $queued = false;
                 } else {
-                    // Réabonnement avant la fin d'un plan payant → file d'attente
-                    $start  = $currentActive->end_date;
-                    $end    = $currentActive->end_date->copy()->addMonths((int) $cycle->months);
-                    $status = $isPaid ? 'pending' : 'active';
-                    $queued = true;
+                    // Réabonnement avant la fin d'un plan payant
+                    $upgradeMode = $request->input('upgrade_mode', 'queued');
+
+                    if ($upgradeMode === 'immediate') {
+                        // Calcul pro-rata : valeur restante déduite du prix du nouveau plan
+                        $totalDays      = max(1, (int) $currentActive->start_date->diffInDays($currentActive->end_date));
+                        $remainingDays  = max(0, (int) now()->diffInDays($currentActive->end_date, false));
+                        $remainingValue = (int) round((int) $currentActive->price * ($remainingDays / $totalDays));
+                        $proRataDue     = max(0, $price - $remainingValue);
+
+                        // Annuler les anciens pending pour éviter les doublons
+                        Subscription::where('client_id', $client->id)
+                            ->where('status', 'pending')
+                            ->where('payment_status', 'pending')
+                            ->update(['status' => 'expired', 'payment_status' => 'cancelled']);
+
+                        $price  = $proRataDue;
+                        $start  = now();
+                        $end    = now()->addMonths((int) $cycle->months);
+                        $status = $proRataDue > 0 ? 'pending' : 'active';
+                        $queued = false;
+                    } else {
+                        // Queued (par défaut) : démarre à la fin de l'abonnement actuel
+                        $start  = $currentActive->end_date;
+                        $end    = $currentActive->end_date->copy()->addMonths((int) $cycle->months);
+                        $status = $isPaid ? 'pending' : 'active';
+                        $queued = true;
+                    }
                 }
             } else {
-                // Pas d'abonnement actif → expirer les pending/suspended et démarrer
+                // Pas d'abonnement actif → expirer les pending/suspended (hors Freemium) et démarrer
                 Subscription::where('client_id', $client->id)
                     ->whereIn('status', ['pending', 'suspended'])
+                    ->whereHas('plan', fn($q) => $q->where('is_freemium', false))
                     ->update(['status' => 'expired']);
 
                 $start  = now();
@@ -474,9 +563,11 @@ class SubscriptionController extends Controller
                   . $start->format('d/m/Y') . ' à la fin de votre abonnement actuel'
                 : 'Souscription créée avec succès';
 
-            // Pour les plans gratuits → activer et loguer immédiatement
+            // Pour les plans gratuits / pro-rata nul → activer et loguer immédiatement
             // Pour les plans payants → en attente de confirmation LengoPay (callback)
-            if (!$isPaid) {
+            $requiresPayment = $price > 0;
+
+            if (!$requiresPayment) {
                 cache()->forget("subscription:current:{$client->id}");
                 ActivityLogger::log('subscription.created', ['plan' => $plan->name], 'subscription', $subscription->id);
             }
@@ -485,7 +576,7 @@ class SubscriptionController extends Controller
                 'message'      => $message,
                 'queued'       => $queued,
                 'starts_at'    => $start->toDateString(),
-                'requires_payment' => $isPaid,
+                'requires_payment' => $requiresPayment,
                 'subscription' => array_merge(
                     $this->formatSubscription($subscription->load('plan')),
                     ['id' => $subscription->id]

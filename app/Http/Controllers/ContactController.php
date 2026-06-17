@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Response;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 
 class ContactController extends Controller
 {
@@ -82,11 +83,61 @@ class ContactController extends Controller
             return response()->json(['message' => 'Client introuvable'], 404);
         }
 
+        $phone = $request->input('phone');
+        $email = $request->input('email');
+
+        // ── Restaurer un contact soft-deleted AVANT la validation ───────────────────
+        // La contrainte UNIQUE MySQL bloque le INSERT même si la validation passe.
+        // On détecte donc d'abord les soft-deleted et on les restaure (UPDATE, pas INSERT).
+        $softDeleted = Contacts::withTrashed()
+            ->where('client_id', $client->id)
+            ->whereNotNull('deleted_at')
+            ->where(function ($q) use ($phone, $email) {
+                if ($phone) $q->orWhere('phone', $phone);
+                if ($email) $q->orWhere('email', $email);
+            })
+            ->first();
+
+        if ($softDeleted) {
+            $request->validate([
+                'first_name'        => 'required|string|max:255',
+                'last_name'         => 'required|string|max:255',
+                'region'            => 'nullable|string|max:255',
+                'preferred_channel' => 'required|in:email,sms,whatsapp,push',
+                'gender'            => 'nullable|in:male,female,other',
+                'age'               => 'nullable|integer|min:1|max:120',
+                'language'          => 'nullable|string|max:10',
+                'country'           => 'nullable|string|max:100',
+                'is_spammer'        => 'boolean',
+            ]);
+
+            $softDeleted->restore();
+            $softDeleted->update([
+                'first_name'        => $request->first_name,
+                'last_name'         => $request->last_name,
+                'phone'             => $phone,
+                'email'             => $email,
+                'region'            => $request->region,
+                'preferred_channel' => $request->preferred_channel ?? 'sms',
+                'gender'            => $request->gender,
+                'age'               => $request->age,
+                'language'          => $request->language,
+                'country'           => $request->country,
+                'is_spammer'        => $request->boolean('is_spammer', false),
+                'status'            => 'active',
+                'client_id'         => $client->id,
+            ]);
+
+            ActivityLogger::log('contact.created', ['name' => trim($request->first_name . ' ' . $request->last_name)], 'contact', $softDeleted->id);
+            return response()->json(['contact' => $softDeleted->fresh()], 201);
+        }
+
+        // ── Aucun soft-deleted : validation normale puis création ───────────────────
         $validator = Validator::make($request->all(), [
             'first_name'        => 'required|string|max:255',
             'last_name'         => 'required|string|max:255',
-            'phone'             => 'nullable|string|max:20|unique:contacts,phone',
-            'email'             => 'nullable|email|max:255|unique:contacts,email',
+            'phone'             => ['nullable', 'string', 'max:20', Rule::unique('contacts', 'phone')->whereNull('deleted_at')],
+            'email'             => ['nullable', 'email', 'max:255', Rule::unique('contacts', 'email')->whereNull('deleted_at')],
             'region'            => 'nullable|string|max:255',
             'preferred_channel' => 'required|in:email,sms,whatsapp,push',
             'gender'            => 'nullable|in:male,female,other',
@@ -100,12 +151,11 @@ class ContactController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $data             = $validator->validated();
-        $data['client_id']= $client->id;
-        $data['status']   = 'active';
+        $data              = $validator->validated();
+        $data['client_id'] = $client->id;
+        $data['status']    = 'active';
 
-        // Si le contact existe déjà en NotInsert (créé via import campagne),
-        // on le "promeut" en contact actif au lieu de rejeter avec une erreur doublon
+        // Si le contact existe en NotInsert (créé via import campagne), le promouvoir
         $existing = Contacts::where('client_id', $client->id)
             ->where('status', 'NotInsert')
             ->where(function ($q) use ($data) {
@@ -135,8 +185,8 @@ class ContactController extends Controller
         $validator = Validator::make($request->all(), [
             'first_name'        => 'required|string|max:255',
             'last_name'         => 'required|string|max:255',
-            'email'             => 'nullable|email|unique:contacts,email,' . $id,
-            'phone'             => 'nullable|string|unique:contacts,phone,' . $id,
+            'email'             => ['nullable', 'email', Rule::unique('contacts', 'email')->ignore($id)->whereNull('deleted_at')],
+            'phone'             => ['nullable', 'string', Rule::unique('contacts', 'phone')->ignore($id)->whereNull('deleted_at')],
             'region'            => 'nullable|string|max:255',
             'preferred_channel' => 'nullable|in:email,sms,whatsapp,push',
             'gender'            => 'nullable|in:male,female,other',
