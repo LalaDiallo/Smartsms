@@ -1,7 +1,7 @@
 @extends('emails.layouts.smartsms')
 
 @section('preheader')
-{{ Str::limit(strip_tags($body ?? ''), 90) }}
+{{ \Illuminate\Support\Str::limit(strip_tags($body ?? ''), 90) }}
 @endsection
 
 @section('title')

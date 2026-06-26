@@ -27,6 +27,7 @@ use App\Http\Controllers\LogController;
 use App\Http\Controllers\CompanyGroupController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\DeviceTokenController;
+use App\Http\Controllers\ZoneController;
 
 // ─── Authentification publique (rate-limitée) ──────────────────────────────
 Route::middleware('throttle:auth')->group(function () {
@@ -46,11 +47,14 @@ Route::get('/auth/{provider}/callback', [SocialAuthController::class, 'callback'
 // Activation de compte (lien email → redirection frontend)
 Route::get('/activate/{token}', [RegisterController::class, 'activate'])->name('activation');
 
-// ─── Routes protégées ──────────────────────────────────────────────────────
+// ─── Routes protégées — toujours accessibles même si le client est suspendu/résilié
 Route::middleware('auth:sanctum')->group(function () {
-
     Route::get('/user', fn (Request $request) => $request->user());
     Route::post('/logout', [LoginController::class, 'logout']);
+});
+
+// ─── Routes protégées — bloquées si l'entreprise est suspendue ou résiliée ──
+Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
 
     // Permissions & rôles
     Route::put('/users/{user}/role', [RolePermissionController::class, 'updateRole'])
@@ -181,6 +185,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/team/{id}/toggle-suspend', [TeamController::class, 'toggleSuspend'])
         ->middleware(['CheckPermission:peut_modifier_utilisateur', 'CheckPlan:starter']);
 
+    // ── Zones (agences internes / admins secondaires) ───────────────────────
+    Route::get('/zones',                [ZoneController::class, 'index'])
+        ->middleware('CheckPermission:peut_modifier_utilisateur');
+    Route::post('/zones',               [ZoneController::class, 'store'])
+        ->middleware(['CheckPermission:peut_creer_utilisateur', 'CheckPlan:starter']);
+    Route::put('/zones/{id}',           [ZoneController::class, 'update'])
+        ->middleware(['CheckPermission:peut_modifier_utilisateur', 'CheckPlan:starter']);
+    Route::delete('/zones/{id}',        [ZoneController::class, 'destroy'])
+        ->middleware(['CheckPermission:peut_supprimer_utilisateur', 'CheckPlan:starter']);
+    Route::get('/zones/{id}/dashboard', [ZoneController::class, 'dashboard'])
+        ->middleware('CheckPermission:peut_modifier_utilisateur');
+
     // ── Logs d'activité ────────────────────────────────────────────────────
     Route::get('/logs',                  [LogController::class, 'index']);
     Route::get('/logs/actions',          [LogController::class, 'actions']);
@@ -199,28 +215,35 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('CheckPermission:peut_personnaliser_contenu');
 
     // ── Entreprise / Clients (super_admin uniquement) ──────────────────────
+    // CheckSuperAdmin (pas CheckPermission) : ces routes gèrent les données
+    // d'AUTRES entreprises — CheckPermission laisse passer tout rôle "admin"
+    // sans vérifier son client_id, ce qui permettrait à l'admin d'une
+    // entreprise de gérer les données d'une autre entreprise.
     Route::get('/entreprise',          [EntrepriseController::class, 'clients'])
-        ->middleware('CheckPermission:peut_attribuer_permissions');
+        ->middleware('CheckSuperAdmin');
     Route::get('/entreprise/{id}',     [EntrepriseController::class, 'showClient'])
-        ->middleware('CheckPermission:peut_attribuer_permissions');
+        ->middleware('CheckSuperAdmin');
     Route::get('/clients',             [EntrepriseController::class, 'index'])
-        ->middleware('CheckPermission:peut_attribuer_permissions');
+        ->middleware('CheckSuperAdmin');
     Route::get('/clients/{id}',        [EntrepriseController::class, 'show'])
-        ->middleware('CheckPermission:peut_attribuer_permissions');
+        ->middleware('CheckSuperAdmin');
     Route::delete('/clients/{id}',     [EntrepriseController::class, 'destroy'])
-        ->middleware('CheckPermission:peut_supprimer_utilisateur');
+        ->middleware('CheckSuperAdmin');
     Route::put('/clients/{id}/suspend',[EntrepriseController::class, 'suspend'])
-        ->middleware('CheckPermission:peut_attribuer_permissions');
+        ->middleware('CheckSuperAdmin');
     Route::post('/clients/{client}/send-email', [EntrepriseController::class, 'sendActionEmail'])
         ->name('clients.send-email');
-    Route::post('/email/send-client-action', [EntrepriseController::class, 'sendClientActionEmail']);
+    Route::post('/email/send-client-action', [EntrepriseController::class, 'sendClientActionEmail'])
+        ->middleware('CheckSuperAdmin');
 
     // Plans (utilise le système unifié SubscriptionPlan)
     Route::get('/plans', [SubscriptionController::class, 'index']);
 
     // ── Dashboard ──────────────────────────────────────────────────────────
     Route::get('/dashboard/auth',  [DashController::class, 'Auth']);         // auth Sanctum suffit
+    Route::get('/dashboard/charts', [DashController::class, 'charts']);       // données des graphiques
     Route::get('/admin/dashboard', [DashController::class, 'adminDashboard']); // super_admin uniquement
+    Route::get('/admin/orange-sms-balance', [DashController::class, 'orangeSmsBalance']); // super_admin uniquement
 
     // ── Notifications header ───────────────────────────────────────────────
     Route::get('/header/notifications', function (Request $request) {
@@ -319,19 +342,30 @@ Route::middleware('auth:sanctum')->group(function () {
     // ── Branding ───────────────────────────────────────────────────────────
     Route::get('/brandings/client',           [BrandingController::class, 'show']);
     Route::post('/brandings',                 [BrandingController::class, 'store']);
-    Route::get('/brandings',                  [BrandingController::class, 'index']);
-    Route::post('/brandings/{id}/approve',    [BrandingController::class, 'approve']);
-    Route::post('/brandings/{id}/reject',     [BrandingController::class, 'reject']);
-    Route::put('/brandings/{id}',             [BrandingController::class, 'update']);
+    // CheckSuperAdmin : ces 4 routes approuvent/rejettent/listent le branding
+    // de N'IMPORTE QUEL client — pas un CheckPermission (bypassable par tout "admin").
+    Route::get('/brandings',                  [BrandingController::class, 'index'])
+        ->middleware('CheckSuperAdmin');
+    Route::post('/brandings/{id}/approve',    [BrandingController::class, 'approve'])
+        ->middleware('CheckSuperAdmin');
+    Route::post('/brandings/{id}/reject',     [BrandingController::class, 'reject'])
+        ->middleware('CheckSuperAdmin');
+    Route::put('/brandings/{id}',             [BrandingController::class, 'update'])
+        ->middleware('CheckSuperAdmin');
     Route::post('/brandings/activate/{id}',   [BrandingController::class, 'activate']);
 
     // ── Sender Names ──────────────────────────────────────────────────────
     Route::get('/sender-names',                    [SenderNameController::class, 'index']);
     Route::post('/sender-names',                   [SenderNameController::class, 'store']);
     Route::post('/sender-names/{id}/activate',     [SenderNameController::class, 'activate']);
-    Route::get('/sender-names/admin',              [SenderNameController::class, 'adminIndex']);
-    Route::post('/sender-names/{id}/approve',      [SenderNameController::class, 'approve']);
-    Route::post('/sender-names/{id}/reject',       [SenderNameController::class, 'reject']);
+    // CheckSuperAdmin : ces 3 routes listent/approuvent/rejettent les demandes
+    // de N'IMPORTE QUEL client — pas un CheckPermission (bypassable par tout "admin").
+    Route::get('/sender-names/admin',              [SenderNameController::class, 'adminIndex'])
+        ->middleware('CheckSuperAdmin');
+    Route::post('/sender-names/{id}/approve',      [SenderNameController::class, 'approve'])
+        ->middleware('CheckSuperAdmin');
+    Route::post('/sender-names/{id}/reject',       [SenderNameController::class, 'reject'])
+        ->middleware('CheckSuperAdmin');
 
     // ── Clés API développeur — plan Pro minimum ────────────────────────────
     Route::middleware('CheckPlan:pro')->group(function () {
@@ -368,19 +402,24 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/segments/{id}/stats',                   [TargetingController::class, 'stats']);
     Route::get('/segments/{id}/resolve',                 [TargetingController::class, 'resolve']);
 
-    // ── Groupes d'entreprise — plan Enterprise uniquement ────────────────────
+    // ── Groupes d'entreprise — plan Enterprise uniquement (côté propriétaire) ──
     Route::middleware('CheckPlan:enterprise')->group(function () {
-        Route::get('/company-groups/search-clients',                    [CompanyGroupController::class, 'searchClients']);
         Route::get('/company-groups',                                   [CompanyGroupController::class, 'index']);
         Route::post('/company-groups',                                  [CompanyGroupController::class, 'store']);
         Route::get('/company-groups/{id}',                              [CompanyGroupController::class, 'show']);
         Route::put('/company-groups/{id}',                              [CompanyGroupController::class, 'update']);
         Route::delete('/company-groups/{id}',                           [CompanyGroupController::class, 'destroy']);
         Route::get('/company-groups/{id}/dashboard',                    [CompanyGroupController::class, 'dashboard']);
-        Route::post('/company-groups/{id}/branches',                    [CompanyGroupController::class, 'addBranch']);
+        Route::get('/company-groups/{id}/branches/{branchId}',          [CompanyGroupController::class, 'branchDetail']);
+        Route::post('/company-groups/{id}/branches/invite',             [CompanyGroupController::class, 'inviteBranch']);
         Route::put('/company-groups/{id}/branches/{branchId}',          [CompanyGroupController::class, 'updateBranch']);
         Route::delete('/company-groups/{id}/branches/{branchId}',       [CompanyGroupController::class, 'removeBranch']);
     });
+
+    // ── Invitations de groupe — côté invité, aucun plan requis ────────────────
+    Route::get('/company-groups/invitations/{token}',          [CompanyGroupController::class, 'getInvitation']);
+    Route::post('/company-groups/invitations/{token}/accept',  [CompanyGroupController::class, 'acceptInvitation']);
+    Route::post('/company-groups/invitations/{token}/decline', [CompanyGroupController::class, 'declineInvitation']);
 });
 
 // ── Simulation paiement (désactivé en production) ────────────────────────────

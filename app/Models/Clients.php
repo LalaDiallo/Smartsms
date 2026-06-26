@@ -81,6 +81,25 @@ class Clients extends Model
         'support_tickets'  => 0,
     ];
 
+    /**
+     * Invalide les caches "enterprise:*" à chaque création/modification/suppression
+     * d'un client — quel que soit l'endroit du code qui déclenche le changement.
+     * Évite d'avoir à se souvenir d'ajouter cache()->forget(...) à chaque nouveau
+     * point de mutation (abonnement, paiement, inscription, suspension, etc.).
+     */
+    protected static function booted(): void
+    {
+        static::saved(function () {
+            cache()->forget('enterprise:clients');
+            cache()->forget('enterprise:plans');
+        });
+
+        static::deleted(function () {
+            cache()->forget('enterprise:clients');
+            cache()->forget('enterprise:plans');
+        });
+    }
+
     // ===================================================================
     // Relations
     // ===================================================================
@@ -96,6 +115,30 @@ class Clients extends Model
     public function subscriptions(): HasMany
     {
         return $this->hasMany(Subscription::class, 'client_id');
+    }
+
+    /**
+     * Resynchronise le statut du client avec son abonnement réel.
+     * Appelé à chaque transition d'abonnement (activation, annulation, expiration).
+     * Ne touche jamais un statut positionné manuellement par un admin
+     * (suspended/resilie) — uniquement le va-et-vient essaie ↔ active.
+     */
+    public function syncStatus(): void
+    {
+        if (in_array($this->status, ['suspended', 'resilie'])) {
+            return;
+        }
+
+        $hasActivePaidSubscription = $this->subscriptions()
+            ->where('status', 'active')
+            ->whereHas('plan', fn ($q) => $q->where('is_freemium', false))
+            ->exists();
+
+        $newStatus = $hasActivePaidSubscription ? 'active' : 'essaie';
+
+        if ($newStatus !== $this->status) {
+            $this->update(['status' => $newStatus]);
+        }
     }
 
     public function branding()

@@ -58,6 +58,20 @@ class LoginController extends Controller
         ], 403);
     }
 
+    // 2c️⃣ Bloquer si l'entreprise (client) elle-même est suspendue ou résiliée
+    if ($user->client_id && $user->client) {
+        if ($user->client->status === 'suspended') {
+            return response()->json([
+                'message' => 'Le compte de votre entreprise a été suspendu. Contactez le support pour le réactiver.',
+            ], 403);
+        }
+        if ($user->client->status === 'resilie') {
+            return response()->json([
+                'message' => 'Le compte de votre entreprise a été résilié. Contactez le support pour le réactiver.',
+            ], 403);
+        }
+    }
+
     // 3️⃣ Vérifier si session existe AVANT création
     $existingSession = UserSession::where('user_id', $user->id)
         ->where('device_id', $request->device_id)
@@ -126,6 +140,18 @@ class LoginController extends Controller
             'device_id' => 'required',
         ]);
 
+        // Verrouillage par compte : un code à 6 chiffres valide 5 min n'offre que
+        // ~50 essais/min via le throttle IP existant, trivialement contournable en
+        // changeant d'IP. On limite donc aussi les tentatives par compte.
+        $attemptsKey = "otp_attempts:{$request->user_id}";
+        $attempts    = (int) cache()->get($attemptsKey, 0);
+
+        if ($attempts >= 5) {
+            return response()->json([
+                'message' => 'Trop de tentatives. Demandez un nouveau code en vous reconnectant.',
+            ], 429);
+        }
+
         $otp = OtpCode::where('user_id', $request->user_id)
             ->where('code', $request->code)
             ->whereNull('used_at')
@@ -134,9 +160,11 @@ class LoginController extends Controller
             ->first();
 
         if (!$otp) {
+            cache()->put($attemptsKey, $attempts + 1, now()->addMinutes(5));
             return response()->json(['message' => 'Code invalide ou expiré'], 422);
         }
 
+        cache()->forget($attemptsKey);
         $otp->update(['used_at' => now()]);
 
         $user = User::findOrFail($request->user_id);
@@ -187,8 +215,8 @@ class LoginController extends Controller
                 ], 401);
             }
 
-            // Journaliser la déconnexion (pour super_admin avec can_generate_logs)
-            if ($user->hasPermission('can_generate_logs')) {
+            // Journaliser la déconnexion (pour super_admin avec peut_generer_journaux_audit)
+            if ($user->hasPermission('peut_generer_journaux_audit')) {
                 Log::info('Déconnexion réussie', [
                     'user_id' => $user->id,
                     'email' => $user->email,

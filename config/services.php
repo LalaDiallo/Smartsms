@@ -131,11 +131,13 @@ return [
     ],
 
     'lengopay' => [
-        'site_id'     => env('LENGOPAY_SITE_ID'),
-        'license_key' => env('LENGOPAY_LICENSE_KEY'),
-        'env'         => env('LENGOPAY_ENV', 'sandbox'),
-        'sandbox_url' => env('LENGOPAY_SANDBOX_URL', 'https://sandbox.lengopay.com/api/v1/payments'),
-        'prod_url'    => env('LENGOPAY_PROD_URL',    'https://api.lengopay.com/api/v1/payments'),
+        'site_id'            => env('LENGOPAY_SITE_ID'),
+        'license_key'        => env('LENGOPAY_LICENSE_KEY'),
+        'env'                => env('LENGOPAY_ENV', 'sandbox'),
+        'sandbox_url'        => env('LENGOPAY_SANDBOX_URL', 'https://sandbox.lengopay.com/api/v1/payments'),
+        'prod_url'           => env('LENGOPAY_PROD_URL',    'https://api.lengopay.com/api/v1/payments'),
+        'status_sandbox_url' => env('LENGOPAY_STATUS_SANDBOX_URL', 'https://sandbox.lengopay.com/api/v1/transaction/status'),
+        'status_prod_url'    => env('LENGOPAY_STATUS_PROD_URL',    'https://api.lengopay.com/api/v1/transaction/status'),
     ],
 
     'slack' => [

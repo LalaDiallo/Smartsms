@@ -27,6 +27,7 @@ class Subscription extends Model
         'sms_used',
         'payment_ref',
         'payment_status',
+        'upgrade_mode',
     ];
 
     protected $casts = [
@@ -92,6 +93,7 @@ class Subscription extends Model
     {
         $this->increment('sms_used', $amount);
         $this->refresh(); // recharger sms_used après increment
+        cache()->forget("subscription:current:{$this->client_id}");
 
         $this->checkSmsQuotaAlert();
     }
@@ -189,11 +191,33 @@ class Subscription extends Model
             'status' => 'cancelled',
             'auto_renew' => false
         ]);
+
+        $this->client?->syncStatus();
     }
 
     public function expire(): void
     {
         $this->update(['status' => 'expired']);
+
+        $this->client?->syncStatus();
+    }
+
+    /**
+     * Active un abonnement programmé (queued) dont le paiement est déjà confirmé.
+     * Appelé par subscriptions:expire quand le plan actuel arrive à échéance.
+     */
+    public function activate(): void
+    {
+        $this->update(['status' => 'active']);
+
+        // Suspendre le Freemium encore actif — le plan payant prend le relais
+        self::where('client_id', $this->client_id)
+            ->where('id', '!=', $this->id)
+            ->where('status', 'active')
+            ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
+            ->update(['status' => 'suspended']);
+
+        $this->client?->syncStatus();
     }
 
     public function subscriptionplan()

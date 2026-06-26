@@ -28,6 +28,7 @@ class User extends Authenticatable
         'role',
         'activation_token',
         'client_id',
+        'zone_id',
         'phone',
         'status',
         'bio',
@@ -75,6 +76,11 @@ class User extends Authenticatable
     public function client()
     {
         return $this->belongsTo(Clients::class,'client_id');
+    }
+
+    public function zone()
+    {
+        return $this->belongsTo(Zone::class);
     }
 
     public function permissions()

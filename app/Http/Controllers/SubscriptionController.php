@@ -402,21 +402,16 @@ class SubscriptionController extends Controller
             return response()->json(['upgrade_needed' => false]);
         }
 
-        $totalDays      = max(1, (int) $currentActive->start_date->diffInDays($currentActive->end_date));
-        $remainingDays  = max(0, (int) now()->diffInDays($currentActive->end_date, false));
-        $remainingValue = (int) round((int) $currentActive->price * ($remainingDays / $totalDays));
-        $proRataDue     = max(0, $newPrice - $remainingValue);
+        $remainingDays = max(0, (int) now()->diffInDays($currentActive->end_date, false));
 
         return response()->json([
             'upgrade_needed'    => true,
             'current_plan_name' => $currentActive->plan?->name,
             'current_end_date'  => $currentActive->end_date->toDateString(),
             'days_remaining'    => $remainingDays,
-            'remaining_value'   => $remainingValue,
             'new_plan_name'     => $plan->name,
             'new_plan_price'    => $newPrice,
             'new_sms_quota'     => $newSmsQuota,
-            'pro_rata_due'      => $proRataDue,
             'currency'          => 'GNF',
         ]);
     }
@@ -476,7 +471,8 @@ class SubscriptionController extends Controller
                 ->first();
 
             // Statut initial : pending si payant, active si gratuit (freemium)
-            $isPaid = $price > 0;
+            $isPaid      = $price > 0;
+            $upgradeMode = null;
 
             if ($currentActive) {
                 // Si l'abonnement actif est Freemium et qu'on souscrit à un plan payant,
@@ -502,22 +498,17 @@ class SubscriptionController extends Controller
                     $upgradeMode = $request->input('upgrade_mode', 'queued');
 
                     if ($upgradeMode === 'immediate') {
-                        // Calcul pro-rata : valeur restante déduite du prix du nouveau plan
-                        $totalDays      = max(1, (int) $currentActive->start_date->diffInDays($currentActive->end_date));
-                        $remainingDays  = max(0, (int) now()->diffInDays($currentActive->end_date, false));
-                        $remainingValue = (int) round((int) $currentActive->price * ($remainingDays / $totalDays));
-                        $proRataDue     = max(0, $price - $remainingValue);
-
+                        // Upgrade immédiat : l'ancien plan est annulé (sans crédit) et le
+                        // nouveau est facturé plein tarif puis activé tout de suite.
                         // Annuler les anciens pending pour éviter les doublons
                         Subscription::where('client_id', $client->id)
                             ->where('status', 'pending')
                             ->where('payment_status', 'pending')
                             ->update(['status' => 'expired', 'payment_status' => 'cancelled']);
 
-                        $price  = $proRataDue;
                         $start  = now();
                         $end    = now()->addMonths((int) $cycle->months);
-                        $status = $proRataDue > 0 ? 'pending' : 'active';
+                        $status = $isPaid ? 'pending' : 'active';
                         $queued = false;
                     } else {
                         // Queued (par défaut) : démarre à la fin de l'abonnement actuel
@@ -553,6 +544,7 @@ class SubscriptionController extends Controller
                 'currency'             => 'GNF',
                 'sms_quota'            => $smsQuota,
                 'sms_used'             => 0,
+                'upgrade_mode'         => $upgradeMode === 'immediate' ? 'immediate' : null,
             ]);
 
             // Synchroniser plan_id sur le client (rétrocompat)
@@ -563,13 +555,20 @@ class SubscriptionController extends Controller
                   . $start->format('d/m/Y') . ' à la fin de votre abonnement actuel'
                 : 'Souscription créée avec succès';
 
-            // Pour les plans gratuits / pro-rata nul → activer et loguer immédiatement
+            // Pour les plans gratuits → activer et loguer immédiatement
             // Pour les plans payants → en attente de confirmation LengoPay (callback)
             $requiresPayment = $price > 0;
 
             if (!$requiresPayment) {
                 cache()->forget("subscription:current:{$client->id}");
                 ActivityLogger::log('subscription.created', ['plan' => $plan->name], 'subscription', $subscription->id);
+
+                // Upgrade immédiat vers un plan gratuit (sans paiement) → écraser l'ancien plan tout de suite
+                if ($upgradeMode === 'immediate' && $status === 'active' && $currentActive) {
+                    $currentActive->update(['status' => 'cancelled']);
+                }
+
+                $client->syncStatus();
             }
 
             return response()->json([

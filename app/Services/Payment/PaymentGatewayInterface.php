@@ -23,6 +23,13 @@ interface PaymentGatewayInterface
      */
     public function handleCallback(array $payload): array;
 
+    /**
+     * Interroge activement le provider pour connaître le statut réel d'un paiement.
+     * Utilisé en secours quand le callback n'est jamais arrivé (ex: callback_url inaccessible).
+     * Retourne ['status' => 'SUCCESS'|'FAILED'|'PENDING'|'UNKNOWN', 'pay_id' => string, 'amount' => mixed, 'date' => mixed]
+     */
+    public function verifyStatus(string $payId): array;
+
     /** Nom lisible du provider (pour les logs). */
     public function name(): string;
 }

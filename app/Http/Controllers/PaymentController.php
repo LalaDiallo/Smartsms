@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use App\Models\PaymentTransaction;
 use App\Models\Subscription;
@@ -291,8 +292,7 @@ class PaymentController extends Controller
      */
     public function lengoCallback(Request $request)
     {
-        $payId  = $request->input('pay_id');
-        $status = strtoupper($request->input('status', ''));
+        $payId = $request->input('pay_id');
 
         Log::info('LengoPay callback reçu', $request->all());
 
@@ -300,10 +300,28 @@ class PaymentController extends Controller
             return response()->json(['error' => 'pay_id manquant'], 400);
         }
 
+        // Sécurité : cette route est publique (LengoPay ne signe pas son callback).
+        // On NE FAIT JAMAIS confiance au champ "status" envoyé dans le corps de la
+        // requête — n'importe qui connaissant un pay_id pourrait POSTer status=SUCCESS
+        // et activer un abonnement/recharge sans payer. On revérifie systématiquement
+        // le statut réel auprès de LengoPay avant d'agir.
+        $result = PaymentGatewayFactory::make()->verifyStatus($payId);
+        $status = $result['status'];
+
+        Log::info('LengoPay callback: statut revérifié auprès de LengoPay', [
+            'pay_id' => $payId, 'status' => $status,
+        ]);
+
         // ── Vérifier si c'est une recharge SMS (topup) ───────────────────────
         $topup = \App\Models\SmsTopupPayment::where('payment_ref', $payId)->first();
         if ($topup) {
-            return $this->handleTopupCallback($topup, $status);
+            if ($status === 'SUCCESS') {
+                return $this->handleTopupCallback($topup, 'SUCCESS');
+            }
+            if ($status === 'FAILED') {
+                return $this->handleTopupCallback($topup, 'FAILED');
+            }
+            return response()->json(['received' => true]);
         }
 
         // ── Sinon, c'est un abonnement ────────────────────────────────────────
@@ -315,17 +333,46 @@ class PaymentController extends Controller
         }
 
         if ($status === 'SUCCESS') {
-            // Ne pas réactiver un abonnement déjà annulé ou expiré par l'utilisateur
-            if ($subscription->status !== 'pending') {
-                Log::info('LengoPay callback: SUCCESS ignoré (statut non-pending)', [
-                    'pay_id' => $payId,
-                    'status' => $subscription->status,
-                ]);
-                return response()->json(['received' => true]);
-            }
+            $this->activateSubscriptionPayment($subscription, $payId);
+        } elseif ($status === 'FAILED') {
+            $this->failSubscriptionPayment($subscription, $payId);
+        }
+        // PENDING/UNKNOWN : on n'agit pas, on attend une confirmation définitive.
 
-            $months = $subscription->billingCycle?->months ?? 1;
+        return response()->json(['received' => true]);
+    }
 
+    /** Active un abonnement après confirmation LengoPay (callback ou vérification manuelle). */
+    private function activateSubscriptionPayment(Subscription $subscription, string $payId): void
+    {
+        // Ne pas réactiver un abonnement déjà annulé ou expiré par l'utilisateur
+        if ($subscription->status !== 'pending') {
+            Log::info('LengoPay: SUCCESS ignoré (statut non-pending)', [
+                'pay_id' => $payId,
+                'status' => $subscription->status,
+            ]);
+            return;
+        }
+
+        // Abonnement programmé (queued) : son start_date est la date de fin du plan
+        // actuel, pas maintenant. On confirme juste le paiement — l'activation réelle
+        // se fera via subscriptions:expire quand le plan en cours arrivera à échéance.
+        if ($subscription->start_date && $subscription->start_date->isFuture()) {
+            $subscription->update(['payment_status' => 'paid']);
+            cache()->forget("subscription:current:{$subscription->client_id}");
+            Log::info('LengoPay: paiement confirmé — abonnement programmé en attente de la fin du plan actuel', [
+                'id'         => $subscription->id,
+                'start_date' => $subscription->start_date->toDateString(),
+            ]);
+            return;
+        }
+
+        $months = $subscription->billingCycle?->months ?? 1;
+
+        // Toutes les écritures liées à cette activation doivent réussir ou échouer
+        // ensemble — sinon un crash en plein milieu peut laisser un client avec
+        // deux abonnements actifs en même temps (double quota SMS) ou aucun.
+        $freemiumBonus = DB::transaction(function () use ($subscription, $months) {
             // SMS restants du Freemium à transférer (uniquement si encore dans la période d'essai d'1 mois)
             $freemiumBonus = 0;
             $trialFreemium = Subscription::where('client_id', $subscription->client_id)
@@ -333,6 +380,7 @@ class PaymentController extends Controller
                 ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
                 ->whereNotNull('end_date')
                 ->where('end_date', '>', now())
+                ->lockForUpdate()
                 ->first();
 
             if ($trialFreemium) {
@@ -347,13 +395,6 @@ class PaymentController extends Controller
                 'sms_quota'      => $subscription->sms_quota + $freemiumBonus,
             ]);
 
-            if ($freemiumBonus > 0) {
-                Log::info('LengoPay: SMS Freemium transférés', [
-                    'client_id'     => $subscription->client_id,
-                    'sms_transferes' => $freemiumBonus,
-                ]);
-            }
-
             // Suspendre le Freemium — il reprendra sa place à l'expiration du plan payant
             Subscription::where('client_id', $subscription->client_id)
                 ->where('id', '!=', $subscription->id)
@@ -361,24 +402,45 @@ class PaymentController extends Controller
                 ->whereHas('plan', fn($q) => $q->where('is_freemium', true))
                 ->update(['status' => 'suspended']);
 
-            cache()->forget("subscription:current:{$subscription->client_id}");
+            // Upgrade immédiat : écraser l'ancien plan payant encore actif
+            if ($subscription->upgrade_mode === 'immediate') {
+                Subscription::where('client_id', $subscription->client_id)
+                    ->where('id', '!=', $subscription->id)
+                    ->where('status', 'active')
+                    ->whereHas('plan', fn($q) => $q->where('is_freemium', false))
+                    ->update(['status' => 'cancelled']);
+            }
 
-            ActivityLogger::log(
-                'subscription.created',
-                ['plan' => $subscription->plan?->name ?? 'Plan'],
-                'subscription',
-                $subscription->id
-            );
+            $subscription->client?->syncStatus();
 
-            Log::info('LengoPay: abonnement activé', ['id' => $subscription->id]);
+            return $freemiumBonus;
+        });
 
-        } else {
-            $subscription->update(['status' => 'expired', 'payment_status' => 'failed']);
-            cache()->forget("subscription:current:{$subscription->client_id}");
-            Log::warning('LengoPay: abonnement expiré (paiement échoué)', ['pay_id' => $payId]);
+        if ($freemiumBonus > 0) {
+            Log::info('LengoPay: SMS Freemium transférés', [
+                'client_id'     => $subscription->client_id,
+                'sms_transferes' => $freemiumBonus,
+            ]);
         }
 
-        return response()->json(['received' => true]);
+        cache()->forget("subscription:current:{$subscription->client_id}");
+
+        ActivityLogger::log(
+            'subscription.created',
+            ['plan' => $subscription->plan?->name ?? 'Plan'],
+            'subscription',
+            $subscription->id
+        );
+
+        Log::info('LengoPay: abonnement activé', ['id' => $subscription->id]);
+    }
+
+    /** Marque un abonnement comme expiré après échec de paiement confirmé. */
+    private function failSubscriptionPayment(Subscription $subscription, string $payId): void
+    {
+        $subscription->update(['status' => 'expired', 'payment_status' => 'failed']);
+        cache()->forget("subscription:current:{$subscription->client_id}");
+        Log::warning('LengoPay: abonnement expiré (paiement échoué)', ['pay_id' => $payId]);
     }
 
     // ─── Webhooks (routes publiques) ────────────────────────────────────────────
@@ -461,7 +523,16 @@ class PaymentController extends Controller
             ->first();
 
         if ($topup) {
-            return $this->handleTopupCallback($topup, 'SUCCESS');
+            $result = PaymentGatewayFactory::make()->verifyStatus($payId);
+            Log::info('LengoPay verifyStatus (topup)', ['pay_id' => $payId, 'result' => $result]);
+
+            if ($result['status'] === 'SUCCESS') {
+                return $this->handleTopupCallback($topup, 'SUCCESS');
+            }
+            if ($result['status'] === 'FAILED') {
+                return $this->handleTopupCallback($topup, 'FAILED');
+            }
+            return response()->json(['activated' => false, 'message' => 'En attente de confirmation LengoPay'], 200);
         }
 
         // Chercher la subscription liée à ce pay_id (quel que soit son statut)
@@ -485,8 +556,37 @@ class PaymentController extends Controller
             return response()->json(['activated' => false, 'message' => 'Paiement annulé'], 200);
         }
 
-        // Toujours en attente de confirmation du callback LengoPay
+        // En attente : le callback n'est peut-être jamais arrivé → interroger LengoPay directement
         if ($subscription && $subscription->status === 'pending') {
+            $result = PaymentGatewayFactory::make()->verifyStatus($payId);
+            Log::info('LengoPay verifyStatus (subscription)', ['pay_id' => $payId, 'result' => $result]);
+
+            if ($result['status'] === 'SUCCESS') {
+                $this->activateSubscriptionPayment($subscription, $payId);
+                $subscription->refresh();
+
+                if ($subscription->status === 'active') {
+                    return response()->json([
+                        'activated' => true,
+                        'type'      => 'subscription',
+                        'plan_name' => $subscription->plan?->name,
+                        'sms_quota' => $subscription->sms_quota,
+                    ]);
+                }
+
+                // Abonnement programmé (queued) : paiement confirmé, mais le plan
+                // ne démarrera qu'à la fin de l'abonnement actuel.
+                return response()->json([
+                    'activated' => false,
+                    'queued'    => true,
+                    'message'   => 'Paiement confirmé — votre nouveau plan démarrera le '
+                        . $subscription->start_date->format('d/m/Y'),
+                ]);
+            }
+            if ($result['status'] === 'FAILED') {
+                $this->failSubscriptionPayment($subscription, $payId);
+                return response()->json(['activated' => false, 'message' => 'Paiement échoué'], 200);
+            }
             return response()->json(['activated' => false, 'message' => 'En attente de confirmation LengoPay'], 200);
         }
 
@@ -513,16 +613,21 @@ class PaymentController extends Controller
     private function handleTopupCallback(\App\Models\SmsTopupPayment $topup, string $status): \Illuminate\Http\JsonResponse
     {
         if ($status === 'SUCCESS') {
-            $topup->update(['status' => 'paid']);
+            // Marquer payé + créditer le quota doivent réussir ensemble — sinon
+            // un crash entre les deux laisse une recharge payée jamais créditée.
+            DB::transaction(function () use ($topup) {
+                $topup->update(['status' => 'paid']);
 
-            // Ajouter les SMS au quota de l'abonnement lié
-            if ($topup->subscription_id) {
-                $sub = Subscription::find($topup->subscription_id);
-                if ($sub) {
-                    $sub->increment('sms_quota', $topup->sms_count);
-                    cache()->forget("subscription:current:{$topup->client_id}");
+                // Ajouter les SMS au quota de l'abonnement lié
+                if ($topup->subscription_id) {
+                    $sub = Subscription::where('id', $topup->subscription_id)->lockForUpdate()->first();
+                    if ($sub) {
+                        $sub->increment('sms_quota', $topup->sms_count);
+                    }
                 }
-            }
+            });
+
+            cache()->forget("subscription:current:{$topup->client_id}");
 
             ActivityLogger::log('subscription.topup', [
                 'count' => $topup->sms_count,

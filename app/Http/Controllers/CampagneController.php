@@ -40,7 +40,8 @@ class CampagneController extends Controller
 
     public function index(Request $request)
     {
-        $client = auth()->user()->client;
+        $user   = auth()->user();
+        $client = $user->client;
 
         if (!$client) {
             return response()->json(['message' => 'Client introuvable'], 404);
@@ -48,6 +49,10 @@ class CampagneController extends Controller
 
         $query = Campagnes::with(['messages'])
             ->where('client_id', $client->id);
+
+        if ($user->zone_id) {
+            $query->where('zone_id', $user->zone_id);
+        }
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -120,6 +125,7 @@ class CampagneController extends Controller
                 $campaign = Campagnes::create([
                     'user_id'    => $user->id,
                     'client_id'  => $user->client_id,
+                    'zone_id'    => $user->zone_id,
                     'name'       => $validatedData['name'],
                     'status'     => 'brouillon',
                     'start_date' => Carbon::now(),
@@ -592,6 +598,7 @@ class CampagneController extends Controller
         return Campagnes::create([
             'user_id'    => $user->id,
             'client_id'  => $user->client_id,
+            'zone_id'    => $user->zone_id,
             'name'       => $validatedData['name'],
             'status'     => $status,
             'start_date' => Carbon::now(),
@@ -617,6 +624,7 @@ class CampagneController extends Controller
         return Campagnes::create([
             'user_id'    => $user->id,
             'client_id'  => $user->client_id,
+            'zone_id'    => $user->zone_id,
             'name'       => $validatedData['name'],
             'status'     => $status,
             'start_date' => Carbon::now(),
@@ -712,6 +720,7 @@ class CampagneController extends Controller
 
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             $name = $campaign->name;
@@ -737,11 +746,12 @@ class CampagneController extends Controller
         ]);
 
         try {
-            $clientId = auth()->user()->client_id;
+            $user = auth()->user();
             $ids = $request->input('ids');
 
             $validCount = Campagnes::whereIn('id', $ids)
-                ->where('client_id', $clientId)
+                ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->count();
 
             if ($validCount !== count($ids)) {
@@ -769,6 +779,7 @@ class CampagneController extends Controller
 
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->with(['messages'])
                 ->firstOrFail();
 
@@ -1196,6 +1207,7 @@ class CampagneController extends Controller
 
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             $messages = Messages::with('contact')
@@ -1235,6 +1247,7 @@ class CampagneController extends Controller
         $user = Auth::user();
         $campagne = Campagnes::where('id', $id)
             ->where('client_id', $user->client_id)
+            ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
             ->find($id);
 
         if (!$campagne) {
@@ -1259,6 +1272,7 @@ class CampagneController extends Controller
         $user = Auth::user();
         $campagne = Campagnes::where('id', $id)
             ->where('client_id', $user->client_id)
+            ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
             ->find($id);
 
         if (!$campagne) {
@@ -1281,8 +1295,10 @@ class CampagneController extends Controller
     public function reject(Request $request, $id)
     {
         try {
+            $user = auth()->user();
             $campaign = Campagnes::where('id', $id)
-                ->where('client_id', auth()->user()->client_id)
+                ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             $campaign->update(['status' => 'rejeter']);
@@ -1320,8 +1336,10 @@ class CampagneController extends Controller
     public function approve(Request $request, $id)
     {
         try {
+            $user = auth()->user();
             $campaign = Campagnes::where('id', $id)
-                ->where('client_id', auth()->user()->client_id)
+                ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             if ($campaign->status !== 'attente') {
@@ -1358,6 +1376,7 @@ class CampagneController extends Controller
             $user = Auth::user();
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             if ($campaign->status === 'terminer') {
@@ -1460,6 +1479,7 @@ class CampagneController extends Controller
             $user = Auth::user();
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
+                ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
 
             if ($campaign->status === 'terminer') {
@@ -1542,8 +1562,13 @@ class CampagneController extends Controller
             }
             // ────────────────────────────────────────────────────────────────
 
+            // dispatchSync exécute le job immédiatement (pas de file d'attente) — il
+            // pose lui-même le statut final ('terminer' ou 'rejeter') selon l'issue
+            // réelle de l'envoi. Ne pas l'écraser ici avec 'programmer', sinon la
+            // campagne reste affichée "en cours" indéfiniment même après un envoi
+            // terminé ou un rejet pour quota insuffisant.
             SendCampaignMessagesJob::dispatchSync($campaign);
-            $campaign->update(['status' => 'programmer']);
+            $campaign->refresh();
 
             ActivityLogger::log('campaign.launched', ['name' => $campaign->name], 'campaign', (int) $id);
 

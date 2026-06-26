@@ -12,6 +12,7 @@ class Campagnes extends Model
     protected $fillable = [
         'user_id',
         'client_id',
+        'zone_id',
         'name',
         'description',
         'status',
@@ -39,6 +40,11 @@ class Campagnes extends Model
     public function client()
     {
         return $this->belongsTo(Clients::class, 'client_id');
+    }
+
+    public function zone()
+    {
+        return $this->belongsTo(Zone::class);
     }
 
     public function template()

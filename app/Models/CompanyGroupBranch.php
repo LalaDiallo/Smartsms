@@ -8,7 +8,12 @@ class CompanyGroupBranch extends Model
 {
     protected $fillable = [
         'group_id', 'client_id', 'zone_name',
-        'zone_type', 'sms_quota_allocated', 'status',
+        'zone_type', 'status',
+        'invitation_token', 'invitation_expires_at',
+    ];
+
+    protected $casts = [
+        'invitation_expires_at' => 'datetime',
     ];
 
     public function group()

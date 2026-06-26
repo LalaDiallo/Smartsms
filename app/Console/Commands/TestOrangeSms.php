@@ -50,6 +50,8 @@ class TestOrangeSms extends Command
                 $this->info("Statut    : " . ($contract['status'] ?? '?'));
                 $this->info("Solde SMS : " . ($contract['availableUnits'] ?? 0));
                 $this->info("Expiration: " . ($contract['expirationDate'] ?? '?'));
+                $this->line('--- JSON brut du contrat (pour voir tous les champs disponibles) ---');
+                $this->line(json_encode($contract, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
                 $this->line('---');
             }
             return self::SUCCESS;

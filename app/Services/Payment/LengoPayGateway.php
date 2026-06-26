@@ -10,6 +10,7 @@ class LengoPayGateway implements PaymentGatewayInterface
     private string $siteId;
     private string $licenseKey;
     private string $apiUrl;
+    private string $statusUrl;
 
     public function __construct()
     {
@@ -19,6 +20,9 @@ class LengoPayGateway implements PaymentGatewayInterface
         $this->apiUrl     = $cfg['env'] === 'production'
             ? $cfg['prod_url']
             : $cfg['sandbox_url'];
+        $this->statusUrl  = $cfg['env'] === 'production'
+            ? $cfg['status_prod_url']
+            : $cfg['status_sandbox_url'];
     }
 
     public function name(): string { return 'LengoPay'; }
@@ -35,19 +39,7 @@ class LengoPayGateway implements PaymentGatewayInterface
         if ($failureUrl)  $payload['failure_url']  = $failureUrl;
         if ($callbackUrl) $payload['callback_url'] = $callbackUrl;
 
-        $http = Http::withHeaders([
-                'Authorization' => 'Basic ' . $this->licenseKey,
-                'Accept'        => 'application/json',
-                'Content-Type'  => 'application/json',
-            ])
-            ->timeout(20);
-
-        // En sandbox/local, désactiver la vérification SSL (cURL XAMPP Windows)
-        if (config('services.lengopay.env') !== 'production') {
-            $http = $http->withoutVerifying();
-        }
-
-        $response = $http->post($this->apiUrl, $payload);
+        $response = $this->httpClient()->post($this->apiUrl, $payload);
 
         if (!$response->successful()) {
             Log::error('LengoPay createPayment failed', ['status' => $response->status(), 'body' => $response->body()]);
@@ -68,5 +60,48 @@ class LengoPayGateway implements PaymentGatewayInterface
             'status' => strtoupper($payload['status'] ?? ''),
             'pay_id' => $payload['pay_id'] ?? '',
         ];
+    }
+
+    public function verifyStatus(string $payId): array
+    {
+        $response = $this->httpClient()->post($this->statusUrl, [
+            'pay_id'    => $payId,
+            'websiteid' => $this->siteId,
+        ]);
+
+        if (!$response->successful()) {
+            Log::error('LengoPay verifyStatus failed', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+                'pay_id' => $payId,
+            ]);
+            return ['status' => 'UNKNOWN', 'pay_id' => $payId, 'amount' => null, 'date' => null];
+        }
+
+        $data = $response->json();
+
+        return [
+            'status' => strtoupper($data['status'] ?? 'UNKNOWN'),
+            'pay_id' => $data['pay_id'] ?? $payId,
+            'amount' => $data['amount'] ?? null,
+            'date'   => $data['date'] ?? null,
+        ];
+    }
+
+    private function httpClient()
+    {
+        $http = Http::withHeaders([
+                'Authorization' => 'Basic ' . $this->licenseKey,
+                'Accept'        => 'application/json',
+                'Content-Type'  => 'application/json',
+            ])
+            ->timeout(20);
+
+        // En sandbox/local, désactiver la vérification SSL (cURL XAMPP Windows)
+        if (config('services.lengopay.env') !== 'production') {
+            $http = $http->withoutVerifying();
+        }
+
+        return $http;
     }
 }

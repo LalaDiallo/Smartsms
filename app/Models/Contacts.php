@@ -9,13 +9,17 @@ class Contacts extends Model
 {
     use SoftDeletes;
     protected $fillable = [
-        'client_id', 'first_name', 'last_name', 'email', 'phone','status','region',
+        'client_id', 'zone_id', 'first_name', 'last_name', 'email', 'phone','status','region',
         'preferred_channel', 'is_spammer','gender','age','language','country',
     ];
 
     public function client()
     {
         return $this->belongsTo(Clients::class, 'client_id');
+    }
+    public function zone()
+    {
+        return $this->belongsTo(Zone::class);
     }
     public function messages()
     {

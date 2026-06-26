@@ -18,7 +18,8 @@ class ContactController extends Controller
 {
     public function index(Request $request)
     {
-        $client = Auth::user()->client;
+        $user   = Auth::user();
+        $client = $user->client;
 
         if (!$client) {
             return response()->json(['message' => 'Client introuvable'], 404);
@@ -26,6 +27,10 @@ class ContactController extends Controller
 
         $query = Contacts::where('client_id', $client->id)
             ->where('status', '!=', 'NotInsert');
+
+        if ($user->zone_id) {
+            $query->where('zone_id', $user->zone_id);
+        }
 
         if ($request->filled('search')) {
             $search = $request->input('search');
@@ -52,10 +57,12 @@ class ContactController extends Controller
 
     public function show(int $id)
     {
-        $client = Auth::user()->client;
+        $user   = Auth::user();
+        $client = $user->client;
 
         $contact = Contacts::with(['messages', 'responses', 'groupes'])
             ->where('client_id', $client->id)
+            ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
             ->findOrFail($id);
 
         $campaigns = $contact->messages()
@@ -77,7 +84,8 @@ class ContactController extends Controller
 
     public function store(Request $request)
     {
-        $client = Auth::user()->client;
+        $user   = Auth::user();
+        $client = $user->client;
 
         if (!$client) {
             return response()->json(['message' => 'Client introuvable'], 404);
@@ -126,6 +134,7 @@ class ContactController extends Controller
                 'is_spammer'        => $request->boolean('is_spammer', false),
                 'status'            => 'active',
                 'client_id'         => $client->id,
+                'zone_id'           => $user->zone_id,
             ]);
 
             ActivityLogger::log('contact.created', ['name' => trim($request->first_name . ' ' . $request->last_name)], 'contact', $softDeleted->id);
@@ -153,6 +162,7 @@ class ContactController extends Controller
 
         $data              = $validator->validated();
         $data['client_id'] = $client->id;
+        $data['zone_id']   = $user->zone_id;
         $data['status']    = 'active';
 
         // Si le contact existe en NotInsert (créé via import campagne), le promouvoir
@@ -240,18 +250,75 @@ class ContactController extends Controller
 
         $now      = now();
         $clientId = $client->id;
-        $toInsert = collect($request->contacts)->map(fn ($c) => array_merge($c, [
-            'client_id'         => $clientId,
-            'status'            => 'active',
-            'preferred_channel' => $c['preferred_channel'] ?? 'sms',
-            'created_at'        => $now,
-            'updated_at'        => $now,
-        ]))->toArray();
+
+        // 1. Dédupliquer à l'intérieur même du lot soumis (même téléphone/email
+        // répété plusieurs fois dans le fichier importé).
+        $seenPhones  = [];
+        $seenEmails  = [];
+        $deduped     = [];
+        $skippedDup  = 0;
+
+        foreach ($request->contacts as $c) {
+            $phone = $c['phone'] ?? null;
+            $email = $c['email'] ?? null;
+
+            if (($phone && isset($seenPhones[$phone])) || ($email && isset($seenEmails[$email]))) {
+                $skippedDup++;
+                continue;
+            }
+            if ($phone) $seenPhones[$phone] = true;
+            if ($email) $seenEmails[$email] = true;
+            $deduped[] = $c;
+        }
+
+        // 2. Exclure les téléphones/emails déjà présents en base (actifs ou
+        // soft-deleted) — `phone`/`email` ont une contrainte UNIQUE au niveau DB,
+        // donc un seul doublon dans un lot de 500 ferait échouer tout le chunk
+        // d'INSERT et perdrait silencieusement les 499 contacts valides avec lui.
+        $phones = array_values(array_filter(array_column($deduped, 'phone')));
+        $emails = array_values(array_filter(array_column($deduped, 'email')));
+
+        $existing = Contacts::withTrashed()
+            ->where(function ($q) use ($phones, $emails) {
+                if ($phones) $q->orWhereIn('phone', $phones);
+                if ($emails) $q->orWhereIn('email', $emails);
+            })
+            ->get(['phone', 'email']);
+
+        $existingPhones = $existing->pluck('phone')->filter()->flip();
+        $existingEmails = $existing->pluck('email')->filter()->flip();
+
+        $toInsert = [];
+
+        foreach ($deduped as $c) {
+            $phone = $c['phone'] ?? null;
+            $email = $c['email'] ?? null;
+
+            if (($phone && $existingPhones->has($phone)) || ($email && $existingEmails->has($email))) {
+                $skippedDup++;
+                continue;
+            }
+
+            $toInsert[] = array_merge($c, [
+                'client_id'         => $clientId,
+                'status'            => 'active',
+                'preferred_channel' => $c['preferred_channel'] ?? 'sms',
+                'created_at'        => $now,
+                'updated_at'        => $now,
+            ]);
+        }
 
         collect($toInsert)->chunk(500)->each(fn ($chunk) => Contacts::insert($chunk->toArray()));
 
+        $message = count($toInsert) . ' contact(s) importé(s) avec succès';
+        if ($skippedDup > 0) {
+            $message .= ", {$skippedDup} doublon(s) ignoré(s)";
+        }
+
         return response()->json([
-            'message' => count($toInsert) . ' contact(s) importé(s) avec succès',
+            'message'            => $message,
+            'imported'           => count($toInsert),
+            'skipped_duplicates' => $skippedDup,
         ], 201);
     }
 
@@ -398,14 +465,14 @@ class ContactController extends Controller
 
         $csv  = "Prénom,Nom,Email,Téléphone,Région,Statut\n";
         foreach ($contacts as $contact) {
-            $csv .= implode(',', [
+            $csv .= implode(',', array_map([$this, 'csvField'], [
                 $contact->first_name,
                 $contact->last_name,
                 $contact->email  ?? '',
                 $contact->phone  ?? '',
                 $contact->region ?? '',
                 $contact->status,
-            ]) . "\n";
+            ])) . "\n";
         }
 
         $filename = 'contacts_' . now()->format('Ymd_His') . '.csv';
@@ -414,6 +481,26 @@ class ContactController extends Controller
             'Content-Type'        => 'text/csv; charset=UTF-8',
             'Content-Disposition' => "attachment; filename=\"{$filename}\"",
         ]);
+    }
+
+    /**
+     * Échappe un champ CSV : encadre de guillemets si nécessaire (virgule, guillemet,
+     * retour à la ligne) et neutralise l'injection de formule (un champ commençant
+     * par =, +, -, @ serait exécuté comme formule par Excel/LibreOffice à l'ouverture).
+     */
+    private function csvField(?string $value): string
+    {
+        $value = (string) $value;
+
+        if (preg_match('/^[=+\-@\t\r]/', $value)) {
+            $value = "'" . $value;
+        }
+
+        if (str_contains($value, ',') || str_contains($value, '"') || str_contains($value, "\n")) {
+            $value = '"' . str_replace('"', '""', $value) . '"';
+        }
+
+        return $value;
     }
 
     public function sendSmsToContact(Request $request)

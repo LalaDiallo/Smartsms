@@ -24,7 +24,7 @@ class CompanyGroup extends Model
     public function branchClients()
     {
         return $this->belongsToMany(Clients::class, 'company_group_branches', 'group_id', 'client_id')
-            ->withPivot(['zone_name', 'zone_type', 'sms_quota_allocated', 'status'])
+            ->withPivot(['zone_name', 'zone_type', 'status'])
             ->withTimestamps();
     }
 }

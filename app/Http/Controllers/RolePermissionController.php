@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use App\Models\RolesPermissions;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use App\Notifications\PermissionChangedNotification;
@@ -16,7 +17,16 @@ class RolePermissionController extends Controller
 {
     public function updateRole(Request $request, User $user)
     {
-        if (!auth()->user()?->hasPermission('peut_attribuer_permissions')) {
+        $caller = auth()->user();
+
+        if (!$caller?->hasPermission('peut_attribuer_permissions')) {
+            return response()->json(['message' => 'Action non autorisée.'], 403);
+        }
+
+        // Un admin (non super_admin) ne peut gérer que les utilisateurs de SA PROPRE
+        // entreprise — sans ce contrôle, "admin" passe CheckPermission pour n'importe
+        // quel rôle (bypass) et pourrait changer le rôle d'un utilisateur d'une AUTRE entreprise.
+        if ($caller->role !== 'super_admin' && $user->client_id !== $caller->client_id) {
             return response()->json(['message' => 'Action non autorisée.'], 403);
         }
 
@@ -26,8 +36,8 @@ class RolePermissionController extends Controller
 
         $user->update(['role' => $validated['role']]);
 
-        if ($user->hasPermission('can_generate_logs')) {
-            \Log::info('Rôle mis à jour', [
+        if ($user->hasPermission('peut_generer_journaux_audit')) {
+            Log::info('Rôle mis à jour', [
                 'user_id' => $user->id,
                 'email' => $user->email,
                 'role' => $validated['role'],

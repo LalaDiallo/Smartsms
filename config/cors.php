@@ -24,7 +24,9 @@ return [
         'http://127.0.0.1:8000',
     ],
 
-    'allowed_origins_patterns' => [],
+    'allowed_origins_patterns' => [
+        '#^https://.*\.trycloudflare\.com$#', // tunnel temporaire (test paiement mobile)
+    ],
 
     'allowed_headers' => ['*'],
 

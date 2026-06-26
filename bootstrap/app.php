@@ -1,8 +1,10 @@
 <?php
 
 use Illuminate\Foundation\Application;
+use App\Http\Middleware\CheckClientStatus;
 use App\Http\Middleware\CheckPermission;
 use App\Http\Middleware\CheckPlan;
+use App\Http\Middleware\CheckSuperAdmin;
 use App\Http\Middleware\DevApiAuth;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -20,9 +22,11 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prepend(HandleCors::class);
 
         $middleware->alias([
-            'CheckPermission' => CheckPermission::class,
-            'CheckPlan'       => CheckPlan::class,
-            'dev.auth'        => DevApiAuth::class,
+            'CheckPermission'   => CheckPermission::class,
+            'CheckPlan'         => CheckPlan::class,
+            'CheckClientStatus' => CheckClientStatus::class,
+            'CheckSuperAdmin'   => CheckSuperAdmin::class,
+            'dev.auth'          => DevApiAuth::class,
         ]);
 
         // NE PAS appeler statefulApi() ici : le frontend utilise Bearer tokens,

@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Mail\CompanyGroupInvitationMail;
+use App\Models\AppNotification;
 use App\Models\Campagnes;
 use App\Models\Clients;
 use App\Models\CompanyGroup;
@@ -10,7 +12,8 @@ use App\Models\Messages;
 use App\Models\Subscription;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 
 class CompanyGroupController extends Controller
 {
@@ -25,7 +28,7 @@ class CompanyGroupController extends Controller
         $clientId = Auth::user()->client_id;
 
         $groups = CompanyGroup::where('owner_client_id', $clientId)
-            ->withCount('branches')
+            ->withCount(['branches' => fn ($q) => $q->where('status', 'active')])
             ->orderByDesc('created_at')
             ->get();
 
@@ -106,44 +109,194 @@ class CompanyGroupController extends Controller
         return response()->json(['message' => 'Groupe supprimé']);
     }
 
-    // ─── Gestion des branches ──────────────────────────────────────────────────
+    // ─── Invitations de branches ────────────────────────────────────────────────
 
     /**
-     * Ajouter une branche (client existant) au groupe.
-     * POST /company-groups/{id}/branches
+     * Inviter un client SmartSMS existant à rejoindre le groupe comme branche.
+     * Le rattachement n'est effectif qu'après acceptation par l'admin du client invité.
+     * POST /company-groups/{id}/branches/invite
      */
-    public function addBranch(Request $request, int $id)
+    public function inviteBranch(Request $request, int $id)
     {
         $group = CompanyGroup::where('id', $id)
             ->where('owner_client_id', Auth::user()->client_id)
             ->firstOrFail();
 
         $validated = $request->validate([
-            'client_id'            => 'required|integer|exists:clients,id',
-            'zone_name'            => 'required|string|max:100',
-            'zone_type'            => 'nullable|in:region,city,sector',
-            'sms_quota_allocated'  => 'nullable|integer|min:0',
+            'email'     => 'required|email',
+            'zone_name' => 'required|string|max:100',
+            'zone_type' => 'nullable|in:region,city,sector',
         ]);
 
-        // Empêcher d'ajouter le propre client propriétaire
-        if ($validated['client_id'] == $group->owner_client_id) {
+        $client = Clients::where('email', $validated['email'])->first();
+
+        if (!$client) {
+            // Message volontairement vague : ne pas confirmer/infirmer l'existence
+            // d'un compte SmartSMS pour cet email (énumération de comptes par un
+            // client Enterprise authentifié testant des adresses au hasard).
+            return response()->json([
+                'message' => "Si un compte SmartSMS existe avec cet email, une invitation lui a été envoyée.",
+            ], 202);
+        }
+
+        if ($client->id == $group->owner_client_id) {
             return response()->json(['message' => 'Le client propriétaire ne peut pas être une branche'], 422);
         }
 
+        $alreadyLinked = CompanyGroupBranch::where('group_id', $group->id)
+            ->where('client_id', $client->id)
+            ->exists();
+
+        if ($alreadyLinked) {
+            return response()->json(['message' => 'Cette entreprise fait déjà partie de ce groupe ou a déjà été invitée.'], 422);
+        }
+
+        $token = Str::random(60);
+
         $branch = CompanyGroupBranch::create([
-            'group_id'            => $group->id,
-            'client_id'           => $validated['client_id'],
-            'zone_name'           => $validated['zone_name'],
-            'zone_type'           => $validated['zone_type'] ?? 'region',
-            'sms_quota_allocated' => $validated['sms_quota_allocated'] ?? 0,
-            'status'              => 'active',
+            'group_id'              => $group->id,
+            'client_id'             => $client->id,
+            'zone_name'             => $validated['zone_name'],
+            'zone_type'             => $validated['zone_type'] ?? 'region',
+            'status'                => 'pending',
+            'invitation_token'      => $token,
+            'invitation_expires_at' => now()->addDays(7),
         ]);
+
+        try {
+            Mail::to($client->email)->send(new CompanyGroupInvitationMail($branch, $group));
+
+            AppNotification::create([
+                'user_id'   => null,
+                'client_id' => $client->id,
+                'type'      => 'info',
+                'title'     => "Invitation à rejoindre un groupe d'entreprise",
+                'body'      => "{$group->ownerClient?->company_name} vous invite à rejoindre le groupe « {$group->name} ».",
+                'link'      => "/group-invitations/{$token}",
+            ]);
+        } catch (\Throwable $e) {
+            // Si l'email échoue, l'invité n'a aucun moyen de savoir qu'il est invité :
+            // on annule la création plutôt que de laisser une invitation fantôme.
+            $branch->delete();
+            report($e);
+            return response()->json(['message' => "L'email d'invitation n'a pas pu être envoyé. Vérifiez la configuration mail et réessayez."], 502);
+        }
 
         return response()->json($branch->load('client'), 201);
     }
 
     /**
-     * Modifier une branche.
+     * Détails publics (côté invité) d'une invitation en attente.
+     * GET /company-groups/invitations/{token}
+     */
+    public function getInvitation(string $token)
+    {
+        $branch = CompanyGroupBranch::where('invitation_token', $token)
+            ->with(['group.ownerClient'])
+            ->first();
+
+        if (!$branch) {
+            return response()->json(['message' => 'Invitation introuvable.'], 404);
+        }
+
+        if ($branch->status !== 'pending') {
+            return response()->json(['message' => 'Cette invitation a déjà été traitée.'], 409);
+        }
+
+        if ($branch->invitation_expires_at && $branch->invitation_expires_at->isPast()) {
+            return response()->json(['message' => 'Cette invitation a expiré.'], 410);
+        }
+
+        if (Auth::user()->client_id !== $branch->client_id) {
+            return response()->json(['message' => 'Cette invitation ne vous concerne pas.'], 403);
+        }
+
+        return response()->json([
+            'group' => [
+                'name'        => $branch->group->name,
+                'description' => $branch->group->description,
+                'industry'    => $branch->group->industry,
+                'owner_name'  => $branch->group->ownerClient?->company_name,
+            ],
+            'zone_name'  => $branch->zone_name,
+            'zone_type'  => $branch->zone_type,
+            'expires_at' => $branch->invitation_expires_at,
+        ]);
+    }
+
+    /**
+     * Accepter une invitation — seul l'admin du client invité peut le faire.
+     * POST /company-groups/invitations/{token}/accept
+     */
+    public function acceptInvitation(string $token)
+    {
+        $branch = CompanyGroupBranch::where('invitation_token', $token)->first();
+
+        if (!$branch) {
+            return response()->json(['message' => 'Invitation introuvable.'], 404);
+        }
+
+        if ($branch->status !== 'pending') {
+            return response()->json(['message' => 'Cette invitation a déjà été traitée.'], 409);
+        }
+
+        if ($branch->invitation_expires_at && $branch->invitation_expires_at->isPast()) {
+            return response()->json(['message' => 'Cette invitation a expiré.'], 410);
+        }
+
+        if (Auth::user()->client_id !== $branch->client_id) {
+            return response()->json(['message' => 'Cette invitation ne vous concerne pas.'], 403);
+        }
+
+        if (Auth::user()->role !== 'admin') {
+            return response()->json(['message' => "Seul l'administrateur de votre compte peut accepter cette invitation."], 403);
+        }
+
+        $branch->update([
+            'status'                => 'active',
+            'invitation_token'      => null,
+            'invitation_expires_at' => null,
+        ]);
+
+        return response()->json([
+            'message' => 'Invitation acceptée.',
+            'branch'  => $branch->fresh()->load('client'),
+        ]);
+    }
+
+    /**
+     * Refuser une invitation — supprime la demande de rattachement.
+     * POST /company-groups/invitations/{token}/decline
+     */
+    public function declineInvitation(string $token)
+    {
+        $branch = CompanyGroupBranch::where('invitation_token', $token)->first();
+
+        if (!$branch) {
+            return response()->json(['message' => 'Invitation introuvable.'], 404);
+        }
+
+        if ($branch->status !== 'pending') {
+            return response()->json(['message' => 'Cette invitation a déjà été traitée.'], 409);
+        }
+
+        if (Auth::user()->client_id !== $branch->client_id) {
+            return response()->json(['message' => 'Cette invitation ne vous concerne pas.'], 403);
+        }
+
+        if (Auth::user()->role !== 'admin') {
+            return response()->json(['message' => "Seul l'administrateur de votre compte peut répondre à cette invitation."], 403);
+        }
+
+        $branch->delete();
+
+        return response()->json(['message' => 'Invitation refusée.']);
+    }
+
+    // ─── Gestion des branches ──────────────────────────────────────────────────
+
+    /**
+     * Modifier une branche (active ou invitation en attente).
      * PUT /company-groups/{id}/branches/{branchId}
      */
     public function updateBranch(Request $request, int $id, int $branchId)
@@ -157,10 +310,9 @@ class CompanyGroupController extends Controller
             ->firstOrFail();
 
         $validated = $request->validate([
-            'zone_name'           => 'sometimes|string|max:100',
-            'zone_type'           => 'nullable|in:region,city,sector',
-            'sms_quota_allocated' => 'nullable|integer|min:0',
-            'status'              => 'nullable|in:active,suspended',
+            'zone_name' => 'sometimes|string|max:100',
+            'zone_type' => 'nullable|in:region,city,sector',
+            'status'    => 'nullable|in:active,suspended',
         ]);
 
         $branch->update($validated);
@@ -169,7 +321,7 @@ class CompanyGroupController extends Controller
     }
 
     /**
-     * Retirer une branche du groupe.
+     * Retirer une branche du groupe, ou annuler une invitation en attente.
      * DELETE /company-groups/{id}/branches/{branchId}
      */
     public function removeBranch(int $id, int $branchId)
@@ -189,17 +341,20 @@ class CompanyGroupController extends Controller
     // ─── Dashboard consolidé ───────────────────────────────────────────────────
 
     /**
-     * Tableau de bord consolidé d'un groupe.
+     * Tableau de bord consolidé d'un groupe (branches actives uniquement).
      * GET /company-groups/{id}/dashboard
      */
     public function dashboard(int $id)
     {
         $group = CompanyGroup::where('id', $id)
             ->where('owner_client_id', Auth::user()->client_id)
-            ->with('branches')
+            ->with('branches.client')
             ->firstOrFail();
 
-        $clientIds = $group->branches->pluck('client_id')->toArray();
+        $activeBranches  = $group->branches->where('status', 'active');
+        $pendingBranches = $group->branches->where('status', 'pending');
+
+        $clientIds   = $activeBranches->pluck('client_id')->toArray();
         $clientIds[] = $group->owner_client_id; // inclure le client propriétaire
 
         // ── KPIs globaux ──────────────────────────────────────────────────────
@@ -227,8 +382,8 @@ class CompanyGroupController extends Controller
             ->selectRaw('SUM(sms_quota) as total_quota, SUM(sms_used) as total_used')
             ->first();
 
-        // ── Performance par branche ───────────────────────────────────────────
-        $branchPerformance = $group->branches->map(function ($branch) {
+        // ── Performance par branche active ────────────────────────────────────
+        $branchPerformance = $activeBranches->map(function ($branch) {
             $campaignIds = Campagnes::where('client_id', $branch->client_id)->pluck('id');
 
             $stats = Messages::whereIn('campagnes_id', $campaignIds)
@@ -245,7 +400,7 @@ class CompanyGroupController extends Controller
                 ->where('status', 'active')->first();
 
             return [
-                'branch_id'      => $branch->id,
+                'id'             => $branch->id,
                 'zone_name'      => $branch->zone_name,
                 'zone_type'      => $branch->zone_type,
                 'client_name'    => $branch->client?->company_name,
@@ -254,10 +409,20 @@ class CompanyGroupController extends Controller
                 'sms_delivered'  => $d,
                 'delivery_rate'  => $t > 0 ? round(($d / $t) * 100, 1) : 0,
                 'sms_remaining'  => $sub ? max(0, $sub->sms_quota - $sub->sms_used) : 0,
-                'quota_allocated'=> $branch->sms_quota_allocated,
                 'campaigns'      => Campagnes::where('client_id', $branch->client_id)->count(),
             ];
-        });
+        })->values();
+
+        // ── Invitations en attente ────────────────────────────────────────────
+        $pendingInvitations = $pendingBranches->map(fn ($branch) => [
+            'id'           => $branch->id,
+            'zone_name'    => $branch->zone_name,
+            'zone_type'    => $branch->zone_type,
+            'client_name'  => $branch->client?->company_name,
+            'client_email' => $branch->client?->email,
+            'invited_at'   => $branch->created_at,
+            'expires_at'   => $branch->invitation_expires_at,
+        ])->values();
 
         // ── Évolution 30 jours ────────────────────────────────────────────────
         $trend = Messages::whereIn('campagnes_id',
@@ -283,35 +448,77 @@ class CompanyGroupController extends Controller
                 'delivery_rate'    => $sent > 0 ? round(($delivered / $sent) * 100, 1) : 0,
                 'total_quota'      => (int) ($quotaStats->total_quota ?? 0),
                 'total_used'       => (int) ($quotaStats->total_used ?? 0),
-                'branches_count'   => $group->branches->count(),
+                'branches_count'   => $activeBranches->count(),
             ],
-            'branches'   => $branchPerformance,
-            'trend'      => $trend,
+            'branches'            => $branchPerformance,
+            'pending_invitations' => $pendingInvitations,
+            'trend'               => $trend,
         ]);
     }
 
     /**
-     * Chercher des clients existants à ajouter comme branche.
-     * GET /company-groups/search-clients?q=...
+     * Détail d'une branche active : stats + évolution 30 jours propres à cette branche.
+     * GET /company-groups/{id}/branches/{branchId}
      */
-    public function searchClients(Request $request)
+    public function branchDetail(int $id, int $branchId)
     {
-        $q = $request->query('q', '');
-        $groupId = $request->query('group_id');
+        $group = CompanyGroup::where('id', $id)
+            ->where('owner_client_id', Auth::user()->client_id)
+            ->firstOrFail();
 
-        $existingIds = $groupId
-            ? CompanyGroupBranch::where('group_id', $groupId)->pluck('client_id')->toArray()
-            : [];
+        $branch = CompanyGroupBranch::where('id', $branchId)
+            ->where('group_id', $group->id)
+            ->where('status', 'active')
+            ->with('client')
+            ->firstOrFail();
 
-        $clients = Clients::where(function ($query) use ($q) {
-                $query->where('company_name', 'LIKE', "%{$q}%")
-                      ->orWhere('contact_name', 'LIKE', "%{$q}%")
-                      ->orWhere('email', 'LIKE', "%{$q}%");
-            })
-            ->whereNotIn('id', $existingIds)
-            ->limit(15)
-            ->get(['id', 'company_name', 'contact_name', 'email', 'status']);
+        $campaignIds = Campagnes::where('client_id', $branch->client_id)->pluck('id');
 
-        return response()->json($clients);
+        $stats = Messages::whereIn('campagnes_id', $campaignIds)
+            ->selectRaw('
+                COUNT(*) as total,
+                SUM(status IN ("sent","delivered")) as sent,
+                SUM(status = "delivered") as delivered,
+                SUM(status = "failed") as failed
+            ')->first();
+
+        $t = (int) ($stats->total ?? 0);
+        $d = (int) ($stats->delivered ?? 0);
+        $f = (int) ($stats->failed ?? 0);
+
+        $sub = Subscription::where('client_id', $branch->client_id)
+            ->where('status', 'active')->first();
+
+        $trend = Messages::whereIn('campagnes_id', $campaignIds)
+            ->where('created_at', '>=', now()->subDays(30))
+            ->selectRaw('
+                DATE(created_at) as date,
+                COUNT(*) as total,
+                SUM(status = "delivered") as delivered,
+                SUM(status = "failed") as failed
+            ')
+            ->groupBy('date')
+            ->orderBy('date')
+            ->get();
+
+        return response()->json([
+            'branch' => [
+                'id'          => $branch->id,
+                'zone_name'   => $branch->zone_name,
+                'zone_type'   => $branch->zone_type,
+                'client_name' => $branch->client?->company_name,
+                'status'      => $branch->status,
+            ],
+            'stats' => [
+                'sms_sent'      => $t,
+                'sms_delivered' => $d,
+                'sms_failed'    => $f,
+                'delivery_rate' => $t > 0 ? round(($d / $t) * 100, 1) : 0,
+                'sms_quota'     => (int) ($sub->sms_quota ?? 0),
+                'sms_remaining' => $sub ? max(0, $sub->sms_quota - $sub->sms_used) : 0,
+                'campaigns'     => $campaignIds->count(),
+            ],
+            'trend' => $trend,
+        ]);
     }
 }

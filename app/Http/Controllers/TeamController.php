@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Models\Zone;
 use App\Models\Contacts;
 use App\Models\Campagnes;
 use App\Helpers\ActivityLogger;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use App\Helpers\PermissionHelper;
 use App\Mail\AccountDeletionMail;
 use Illuminate\Support\Facades\DB;
@@ -21,12 +23,16 @@ use App\Mail\AccountReactivationMail;
 
 class TeamController extends Controller
 {
+    // Rôles que peut créer/gérer un admin secondaire (responsable_regional) dans sa zone
+    private const ZONE_ADMIN_ASSIGNABLE_ROLES = ['operator', 'manager', 'developer'];
+
     public function index()
     {
         $user = Auth::user();
 
         $users = User::where('client_id', $user->client_id)
-            ->with('campaigns','permissions') // Charger la relation campaigns
+            ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
+            ->with('campaigns','permissions','zone') // Charger la relation campaigns
             ->get()
             ->map(function ($user) {
                 return [
@@ -36,6 +42,7 @@ class TeamController extends Controller
                     'phone' => $user->phone ?? null,
                     'role' => $user->role, // Doit correspondre à 'admin', 'manager', 'operator', 'viewer'
                     'status' => $user->status, // Doit correspondre à 'active', 'inactive', 'pending', 'suspended'
+                    'zone' => $user->zone ? ['id' => $user->zone->id, 'name' => $user->zone->name] : null,
                     'avatar' => $user->profil ?? null, // Utiliser profil comme avatar
                     'joinedAt' => $user->created_at->toDateString(),
                     'lastActive' => $user->last_login_at ? $user->last_login_at->toDateString() : 'Jamais',
@@ -61,16 +68,39 @@ class TeamController extends Controller
 
     public function store(Request $request)
     {
+        $creator = auth()->user();
+
         // Validation des données
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users,email',
-            'role' => 'required|in:super_admin,admin,manager,operator,developer,observateur',
+            'role' => 'required|in:super_admin,admin,manager,operator,developer,gouvernement,responsable_regional,observateur',
             'phone' => 'nullable|string|max:20',
+            'zone_id' => [
+                'required_if:role,responsable_regional',
+                'nullable',
+                Rule::exists('zones', 'id')->where('client_id', $creator->client_id),
+            ],
         ]);
 
+        // Un admin secondaire (responsable_regional) ne peut créer que des membres
+        // locaux à sa propre zone, avec un rôle limité.
+        if ($creator->zone_id && !in_array($validated['role'], self::ZONE_ADMIN_ASSIGNABLE_ROLES, true)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Vous ne pouvez créer que des opérateurs, managers ou développeurs dans votre zone.',
+            ], 403);
+        }
+
         try {
-            $tempPassword = 'Password123';
+            // Mot de passe temporaire aléatoire — envoyé par email ci-dessous.
+            // Un mot de passe codé en dur identique pour tous les nouveaux comptes
+            // serait une porte d'entrée triviale avant que l'utilisateur ne le change.
+            $tempPassword = Str::password(14);
+
+            $newZoneId = $creator->zone_id
+                ? $creator->zone_id
+                : ($validated['role'] === 'responsable_regional' ? $validated['zone_id'] : null);
 
             // Création de l'utilisateur
             $user = User::create([
@@ -78,7 +108,8 @@ class TeamController extends Controller
                 'email'             => $validated['email'],
                 'password'          => Hash::make($tempPassword),
                 'role'              => $validated['role'],
-                'client_id'         => auth()->user()->client_id,
+                'client_id'         => $creator->client_id,
+                'zone_id'           => $newZoneId,
                 'status'            => 'active',
                 'email_verified_at' => now(),
                 'activation_token'  => Str::random(60),
@@ -123,23 +154,54 @@ class TeamController extends Controller
 
     public function update(Request $request, $id)
     {
-        $user = User::findOrFail($id);
+        $auth = auth()->user();
+
+        // Scope au client (et à la zone si l'auteur est un admin secondaire) pour
+        // éviter toute modification cross-client / cross-zone.
+        $user = User::where('id', $id)
+            ->where('client_id', $auth->client_id)
+            ->when($auth->zone_id, fn ($q) => $q->where('zone_id', $auth->zone_id))
+            ->first();
+
+        if (!$user) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Utilisateur introuvable ou accès non autorisé.',
+            ], 404);
+        }
 
         // Validation
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users,email,' . $user->id,
-            'role' => 'required|in:super_admin,admin,manager,operator,developer',
+            'role' => 'required|in:super_admin,admin,manager,operator,developer,gouvernement,responsable_regional,observateur',
             'phone' => 'nullable|string|max:20',
+            'zone_id' => [
+                'required_if:role,responsable_regional',
+                'nullable',
+                Rule::exists('zones', 'id')->where('client_id', $auth->client_id),
+            ],
         ]);
+
+        if ($auth->zone_id && !in_array($validated['role'], self::ZONE_ADMIN_ASSIGNABLE_ROLES, true)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Vous ne pouvez assigner que les rôles opérateur, manager ou développeur.',
+            ], 403);
+        }
 
         try {
             $before = ['name' => $user->name, 'email' => $user->email, 'role' => $user->role];
+
+            $newZoneId = $auth->zone_id
+                ? $auth->zone_id
+                : ($validated['role'] === 'responsable_regional' ? $validated['zone_id'] : null);
 
             $user->update([
                 'name' => $validated['name'],
                 'email' => $validated['email'],
                 'role' => $validated['role'],
+                'zone_id' => $newZoneId,
                 'phone' => $validated['phone'] ?? null,
             ]);
 
@@ -179,9 +241,10 @@ class TeamController extends Controller
         try {
             $auth = Auth::user();
 
-            // Scope au client courant pour éviter la suppression cross-client
+            // Scope au client (et à la zone si admin secondaire) pour éviter la suppression cross-client/zone
             $user = User::where('id', $id)
                 ->where('client_id', $auth->client_id)
+                ->when($auth->zone_id, fn ($q) => $q->where('zone_id', $auth->zone_id))
                 ->first();
 
             if (!$user) {
@@ -241,7 +304,21 @@ class TeamController extends Controller
             'reason' => 'nullable|string|max:255'
         ]);
 
-        $user = User::findOrFail($id);
+        $auth = Auth::user();
+
+        // Scope au client (et à la zone si admin secondaire) — auparavant aucun scoping,
+        // ce qui permettait de suspendre/réactiver n'importe quel utilisateur cross-client.
+        $user = User::where('id', $id)
+            ->where('client_id', $auth->client_id)
+            ->when($auth->zone_id, fn ($q) => $q->where('zone_id', $auth->zone_id))
+            ->first();
+
+        if (!$user) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Utilisateur introuvable ou accès non autorisé.',
+            ], 404);
+        }
 
         try {
             if ($user->status === 'suspended') {

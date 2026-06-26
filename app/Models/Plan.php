@@ -26,6 +26,17 @@ class Plan extends Model
         'is_active'              => 'boolean',
     ];
 
+    /**
+     * Invalide le cache "enterprise:plans" à chaque création/modification/suppression
+     * d'un plan — ce cache (10 min) ne se mettait jamais à jour automatiquement
+     * quand un admin modifiait le prix ou les fonctionnalités d'un plan.
+     */
+    protected static function booted(): void
+    {
+        static::saved(fn () => cache()->forget('enterprise:plans'));
+        static::deleted(fn () => cache()->forget('enterprise:plans'));
+    }
+
     // Un plan a plusieurs clients
     public function clients(): HasMany
     {
