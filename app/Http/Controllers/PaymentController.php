@@ -551,8 +551,40 @@ class PaymentController extends Controller
             ]);
         }
 
-        // Annulée ou expirée → ne pas activer
+        // Annulée ou expirée — vérifier quand même auprès de LengoPay.
+        // Cas fréquent en local : la page /payment/cancel se charge (StrictMode ou
+        // redirect prématuré) et expire la subscription AVANT que lengoVerify soit
+        // appelé depuis la page de succès. Si LengoPay confirme SUCCESS, on
+        // remet la subscription en "pending" pour pouvoir l'activer normalement.
         if ($subscription && in_array($subscription->status, ['expired', 'cancelled'])) {
+            $result = PaymentGatewayFactory::make()->verifyStatus($payId);
+            Log::info('LengoPay verifyStatus (subscription expirée/annulée)', [
+                'pay_id' => $payId, 'result' => $result,
+            ]);
+
+            if ($result['status'] === 'SUCCESS') {
+                $subscription->update(['status' => 'pending', 'payment_status' => 'pending']);
+                $this->activateSubscriptionPayment($subscription, $payId);
+                $subscription->refresh();
+
+                if ($subscription->status === 'active') {
+                    return response()->json([
+                        'activated' => true,
+                        'type'      => 'subscription',
+                        'plan_name' => $subscription->plan?->name,
+                        'sms_quota' => $subscription->sms_quota,
+                    ]);
+                }
+
+                // Abonnement programmé (queued)
+                return response()->json([
+                    'activated' => false,
+                    'queued'    => true,
+                    'message'   => 'Paiement confirmé — votre nouveau plan démarrera le '
+                        . ($subscription->start_date?->format('d/m/Y') ?? '—'),
+                ]);
+            }
+
             return response()->json(['activated' => false, 'message' => 'Paiement annulé'], 200);
         }
 

@@ -16,4 +16,4 @@ Route::post('/reply/{token}', [ReplyController::class, 'store'])->name('reply.st
 
 Route::get('/{any}', function () {
     return file_get_contents(public_path('index.html'));
-})->where('any', '.*');
+})->where('any', '^(?!api/|storage/).*');

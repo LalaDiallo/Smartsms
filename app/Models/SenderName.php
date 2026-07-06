@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class SenderName extends Model
 {
     protected $fillable = [
-        'client_id', 'name', 'status',
+        'client_id', 'name', 'document_path', 'metadata', 'status',
         'is_active', 'is_default', 'status_motif',
         'approved_at', 'approved_by',
     ];
@@ -16,6 +16,7 @@ class SenderName extends Model
         'approved_at' => 'datetime',
         'is_active'   => 'boolean',
         'is_default'  => 'boolean',
+        'metadata'    => 'array',
     ];
 
     public function client()

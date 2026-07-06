@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\SenderName;
-use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -20,18 +19,51 @@ class SenderNameController extends Controller
         return response()->json(['data' => $senderNames]);
     }
 
-    // Demande d'un nouveau sender name custom
+    // Demande d'un nouveau sender name avec formulaire complet
     public function store(Request $request)
     {
         $request->validate([
-            'name' => 'required|string|max:255',
+            'name'                    => 'required|string|max:11',
+            'type_client'             => 'required|in:particulier,entreprise',
+            // Particulier
+            'sous_type'               => 'nullable|in:particulier,etudiant,freelance',
+            'nom_complet'             => 'required_if:type_client,particulier|nullable|string|max:255',
+            'cni_numero'              => 'required_if:type_client,particulier|nullable|string|max:100',
+            'categorie_sender'        => 'required|nullable|in:projet_startup,freelance_service,evenementiel,test_developpement,institutionnel,promotionnel,transactionnel,operationnel',
+            'adresse'                 => 'nullable|string|max:500',
+            // Entreprise
+            'raison_sociale'          => 'required_if:type_client,entreprise|nullable|string|max:255',
+            'forme_juridique'         => 'nullable|string|max:100',
+            'rccm'                    => 'required_if:type_client,entreprise|nullable|string|max:100',
+            'nif'                     => 'required_if:type_client,entreprise|nullable|string|max:100',
+            'nom_responsable'         => 'required_if:type_client,entreprise|nullable|string|max:255',
+            'sender_name_alt1'        => 'nullable|string|max:11',
+            'sender_name_alt2'        => 'nullable|string|max:11',
+            'marque_deposee'          => 'nullable|in:oui,non',
+            'numero_depot'            => 'nullable|string|max:100',
+            // Communs
+            'telephone'               => 'nullable|string|max:20',
+            'email'                   => 'nullable|email|max:255',
+            // Pièces jointes (max 5 Mo chacune)
+            'piece_identite'          => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_domicile'          => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_activite'          => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_sms_samples'       => 'required_if:type_client,particulier|nullable|file|mimes:pdf,doc,docx|max:5120',
+            'piece_rccm'              => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_nif'               => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_statuts'           => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'piece_marque'            => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            // Engagement particulier (déclaration unique — 10 points)
+            'engagement_declaration_perso' => $request->type_client === 'particulier' ? ['required', 'accepted'] : ['nullable'],
+            // Engagement entreprise (déclaration unique — 7 points)
+            'engagement_declaration_ent'   => $request->type_client === 'entreprise'  ? ['required', 'accepted'] : ['nullable'],
         ]);
 
         $clientId = Auth::user()->client_id;
 
         $exists = SenderName::where('client_id', $clientId)
             ->where('name', $request->name)
-            ->whereIn('status', ['pending', 'approved'])
+            ->whereIn('status', ['pending_document', 'pending', 'approved'])
             ->exists();
 
         if ($exists) {
@@ -40,22 +72,89 @@ class SenderNameController extends Controller
             ], 422);
         }
 
+        // Stocker les pièces jointes
+        $pieces = [];
+        foreach (['piece_identite', 'piece_domicile', 'piece_activite', 'piece_sms_samples', 'piece_rccm', 'piece_nif', 'piece_statuts', 'piece_marque'] as $field) {
+            if ($request->hasFile($field)) {
+                $pieces[$field] = $request->file($field)->store(
+                    'sender-documents/' . $clientId,
+                    'public'
+                );
+            }
+        }
+
+        $metadata = [
+            'type_client'      => $request->type_client,
+            'sous_type'        => $request->sous_type,
+            'nom_complet'      => $request->nom_complet,
+            'adresse'          => $request->adresse,
+            'cni_numero'       => $request->cni_numero,
+            'categorie_sender' => $request->categorie_sender,
+            'raison_sociale'   => $request->raison_sociale,
+            'forme_juridique'  => $request->forme_juridique,
+            'rccm'             => $request->rccm,
+            'nif'              => $request->nif,
+            'nom_responsable'  => $request->nom_responsable,
+            'sender_name_alt1' => $request->sender_name_alt1,
+            'sender_name_alt2' => $request->sender_name_alt2,
+            'marque_deposee'   => $request->marque_deposee,
+            'numero_depot'     => $request->numero_depot,
+            'telephone'        => $request->telephone,
+            'email'            => $request->email,
+            'pieces_jointes'   => $pieces,
+            'engagements'      => $request->type_client === 'particulier'
+                ? ['declaration_perso' => true]
+                : ['declaration_ent'   => true],
+        ];
+
         $sender = SenderName::create([
             'client_id'  => $clientId,
             'name'       => $request->name,
-            'status'     => 'pending',
+            'metadata'   => $metadata,
+            // pending_document = formulaire signé pas encore uploadé
+            'status'     => 'pending_document',
             'is_active'  => false,
             'is_default' => false,
         ]);
 
         return response()->json([
-            'message' => 'Demande de sender name envoyée. En attente d\'approbation.',
+            'message' => 'Demande créée. Veuillez télécharger, signer et uploader le formulaire.',
             'data'    => $sender,
         ], 201);
     }
 
+    // Upload du formulaire signé (étape 2)
+    public function uploadDocument(Request $request, int $id)
+    {
+        $request->validate([
+            'document' => 'required|file|mimes:pdf,jpg,jpeg,png,doc,docx|max:5120',
+        ]);
+
+        $clientId = Auth::user()->client_id;
+
+        $sender = SenderName::where('id', $id)
+            ->where('client_id', $clientId)
+            ->where('status', 'pending_document')
+            ->firstOrFail();
+
+        $documentPath = $request->file('document')->store(
+            'sender-documents/' . $clientId,
+            'public'
+        );
+
+        $sender->update([
+            'document_path' => $documentPath,
+            'status'        => 'pending',
+        ]);
+
+        return response()->json([
+            'message' => 'Document uploadé. Votre demande est maintenant en attente de validation.',
+            'data'    => $sender->fresh(),
+        ]);
+    }
+
     // Choisir un sender name approuvé comme défaut (désactive les autres)
-    public function activate($id)
+    public function activate(int $id)
     {
         $clientId = Auth::user()->client_id;
 
@@ -86,7 +185,6 @@ class SenderNameController extends Controller
     public function adminIndex()
     {
         $senderNames = SenderName::with('client')
-            ->where('is_default', false)
             ->orderByDesc('created_at')
             ->get();
 
@@ -94,7 +192,7 @@ class SenderNameController extends Controller
     }
 
     // Approuver + basculer en sender name par défaut
-    public function approve($id)
+    public function approve(int $id)
     {
         $sender = SenderName::findOrFail($id);
 
@@ -122,7 +220,7 @@ class SenderNameController extends Controller
     }
 
     // Rejeter
-    public function reject(Request $request, $id)
+    public function reject(Request $request, int $id)
     {
         $sender = SenderName::findOrFail($id);
 

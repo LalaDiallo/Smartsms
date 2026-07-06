@@ -80,8 +80,19 @@ class LengoPayGateway implements PaymentGatewayInterface
 
         $data = $response->json();
 
+        Log::info('LengoPay verifyStatus raw response', ['pay_id' => $payId, 'body' => $data]);
+
+        $rawStatus = strtoupper($data['status'] ?? 'UNKNOWN');
+
+        // Normaliser les variantes possibles du sandbox LengoPay
+        $status = match ($rawStatus) {
+            'SUCCESS', 'SUCCESSFUL', 'COMPLETED', 'PAID', 'APPROVED' => 'SUCCESS',
+            'FAILED', 'FAILURE', 'CANCELLED', 'CANCELED', 'REJECTED', 'ERROR' => 'FAILED',
+            default => $rawStatus,
+        };
+
         return [
-            'status' => strtoupper($data['status'] ?? 'UNKNOWN'),
+            'status' => $status,
             'pay_id' => $data['pay_id'] ?? $payId,
             'amount' => $data['amount'] ?? null,
             'date'   => $data['date'] ?? null,
