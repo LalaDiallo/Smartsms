@@ -26,10 +26,10 @@ class RegisterController extends Controller
             'last_name'  => 'required|string|max:255',
             'email'      => 'required|string|email|max:255|unique:users,email|unique:clients,email',
             'phone'      => 'required|string|max:20|unique:users,phone|unique:clients,phone',
-            'company'    => 'required|string|max:255',
+            'company'    => 'nullable|string|max:255',
             'city'       => 'required|string|max:255',
             'country'    => 'required|string|max:255',
-            'industry'   => 'required|string|max:255',
+            'industry'   => 'nullable|string|max:255',
             'password'   => [
                 'required', 'string', 'min:8', 'confirmed',
                 'regex:/[A-Z]/',    // au moins une majuscule
@@ -46,14 +46,15 @@ class RegisterController extends Controller
 
         try {
             return DB::transaction(function () use ($request) {
+                $fullName = $request->first_name . ' ' . $request->last_name;
                 $client = Clients::create([
-                    'company_name' => $request->company,
-                    'contact_name' => $request->first_name . ' ' . $request->last_name,
+                    'company_name' => $request->company ?: $fullName,
+                    'contact_name' => $fullName,
                     'email'        => $request->email,
                     'phone'        => $request->phone,
                     'city'         => $request->city,
                     'country'      => $request->country,
-                    'industry'     => $request->industry,
+                    'industry'     => $request->industry ?? 'Autre',
                     'status'       => 'essaie',
                     'joined_at'    => now(),
                     'last_activity'=> now(),
@@ -135,6 +136,7 @@ class RegisterController extends Controller
             });
 
         } catch (\Throwable $th) {
+            \Illuminate\Support\Facades\Log::error('Erreur inscription', ['error' => $th->getMessage()]);
             return response()->json([
                 'message' => 'Une erreur est survenue lors de l\'inscription.',
             ], 500);

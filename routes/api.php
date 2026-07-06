@@ -358,6 +358,7 @@ Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
     Route::get('/sender-names',                    [SenderNameController::class, 'index']);
     Route::post('/sender-names',                   [SenderNameController::class, 'store']);
     Route::post('/sender-names/{id}/activate',     [SenderNameController::class, 'activate']);
+    Route::post('/sender-names/{id}/document',     [SenderNameController::class, 'uploadDocument']);
     // CheckSuperAdmin : ces 3 routes listent/approuvent/rejettent les demandes
     // de N'IMPORTE QUEL client — pas un CheckPermission (bypassable par tout "admin").
     Route::get('/sender-names/admin',              [SenderNameController::class, 'adminIndex'])
@@ -367,14 +368,12 @@ Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
     Route::post('/sender-names/{id}/reject',       [SenderNameController::class, 'reject'])
         ->middleware('CheckSuperAdmin');
 
-    // ── Clés API développeur — plan Pro minimum ────────────────────────────
-    Route::middleware('CheckPlan:pro')->group(function () {
-        Route::get('/api-keys',                      [DeveloperApiKeyController::class, 'index']);
-        Route::post('/api-keys',                     [DeveloperApiKeyController::class, 'store']);
-        Route::put('/api-keys/regenerate/{id}',      [DeveloperApiKeyController::class, 'regenerate']);
-        Route::patch('/api-keys/{id}/toggle',        [DeveloperApiKeyController::class, 'toggle']);
-        Route::delete('/api-keys/{id}',              [DeveloperApiKeyController::class, 'destroy']);
-    });
+    // ── Clés API développeur — accessible dès le Freemium ─────────────────
+    Route::get('/api-keys',                      [DeveloperApiKeyController::class, 'index']);
+    Route::post('/api-keys',                     [DeveloperApiKeyController::class, 'store']);
+    Route::put('/api-keys/regenerate/{id}',      [DeveloperApiKeyController::class, 'regenerate']);
+    Route::patch('/api-keys/{id}/toggle',        [DeveloperApiKeyController::class, 'toggle']);
+    Route::delete('/api-keys/{id}',              [DeveloperApiKeyController::class, 'destroy']);
 
     // ── Paiements ─────────────────────────────────────────────────────────────
     Route::prefix('payments')->group(function () {
