@@ -8,8 +8,8 @@ use App\Http\Controllers\Auth\SocialiteController;
 //     return view('welcome');
 // });
 
-Route::get('{provider}/redirect', [SocialiteController::class, 'redirectToProvider'])->name('social.redirect');
-Route::get('{provider}/callback', [SocialiteController::class, 'handleProviderCallback'])->name('social.callback');
+//Route::get('{provider}/redirect', [SocialiteController::class, 'redirectToProvider'])->name('social.redirect');
+//Route::get('{provider}/callback', [SocialiteController::class, 'handleProviderCallback'])->name('social.callback');
 
 Route::get('/reply/{token}', [ReplyController::class, 'show'])->name('reply.show');
 Route::post('/reply/{token}', [ReplyController::class, 'store'])->name('reply.store');

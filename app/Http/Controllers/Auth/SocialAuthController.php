@@ -81,13 +81,13 @@ class SocialAuthController extends Controller
             // Créer le token Sanctum
             $token = $user->createToken('social-auth')->plainTextToken;
 
-            $userData = urlencode(json_encode([
+            $userData = rtrim(base64_encode(json_encode([
                 'id'    => $user->id,
                 'name'  => $user->name,
                 'email' => $user->email,
                 'role'  => $user->role,
                 'avatar'=> $user->avatar,
-            ]));
+            ])), '=');
 
             return redirect("{$frontendUrl}/auth/callback?token={$token}&user={$userData}");
 
