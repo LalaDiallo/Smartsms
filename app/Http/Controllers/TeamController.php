@@ -32,7 +32,7 @@ class TeamController extends Controller
 
         $users = User::where('client_id', $user->client_id)
             ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
-            ->with('campaigns','permissions','zone') // Charger la relation campaigns
+            ->with(['campaigns' => fn ($q) => $q->withCount('messages'), 'permissions', 'zone'])
             ->get()
             ->map(function ($user) {
                 return [
@@ -54,9 +54,7 @@ class TeamController extends Controller
                             ->all()
                         : [],
                     'campaignsCreated' => $user->campaigns->count(),
-                    'totalSent' => $user->campaigns->sum(function ($campaign) {
-                        return $campaign->messages()->count(); // Supposons que messages() retourne une relation
-                    }),
+                    'totalSent' => $user->campaigns->sum('messages_count'),
                 ];
             });
 

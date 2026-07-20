@@ -136,6 +136,8 @@ Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
         ->middleware('CheckPermission:peut_supprimer_campagne');
     Route::get('/campagnes/{id}/statistics',[CampagneController::class, 'statistics'])
         ->middleware('CheckPermission:peut_voir_analytiques');
+    Route::get('/campagnes/{id}/pdf',       [CampagneController::class, 'downloadPdf'])
+        ->middleware('CheckPermission:peut_voir_analytiques');
     Route::post('/campagnes/{id}/archive',   [CampagneController::class, 'archive'])
         ->middleware('CheckPermission:peut_gerer_campagne');
     Route::post('/campagnes/{id}/dearchive', [CampagneController::class, 'DeArchive'])
@@ -325,6 +327,7 @@ Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
     Route::delete('/sessions',              [SettingController::class, 'destroySession']);
     Route::post('/auth/enable-2fa',         [SettingController::class, 'enable2FA']);
     Route::post('/auth/disable-2fa',        [SettingController::class, 'disable2FA']);
+    Route::post('/auth/verify-password',    [SettingController::class, 'verifyPassword']);
 
     // Sessions
     Route::get('/auth/sessions', function (Request $request) {
@@ -353,12 +356,14 @@ Route::middleware(['auth:sanctum', 'CheckClientStatus'])->group(function () {
     Route::put('/brandings/{id}',             [BrandingController::class, 'update'])
         ->middleware('CheckSuperAdmin');
     Route::post('/brandings/activate/{id}',   [BrandingController::class, 'activate']);
+    Route::get('/brandings/{id}/pdf',         [BrandingController::class, 'downloadPdf']);
 
     // ── Sender Names ──────────────────────────────────────────────────────
     Route::get('/sender-names',                    [SenderNameController::class, 'index']);
     Route::post('/sender-names',                   [SenderNameController::class, 'store']);
     Route::post('/sender-names/{id}/activate',     [SenderNameController::class, 'activate']);
     Route::post('/sender-names/{id}/document',     [SenderNameController::class, 'uploadDocument']);
+    Route::get('/sender-names/{id}/pdf',           [SenderNameController::class, 'downloadPdf']);
     // CheckSuperAdmin : ces 3 routes listent/approuvent/rejettent les demandes
     // de N'IMPORTE QUEL client — pas un CheckPermission (bypassable par tout "admin").
     Route::get('/sender-names/admin',              [SenderNameController::class, 'adminIndex'])

@@ -50,7 +50,7 @@ class ContactController extends Controller
             $query->where('region', $request->region);
         }
 
-        $contacts = $query->orderByDesc('created_at')->get();
+        $contacts = $query->orderByDesc('created_at')->paginate(100);
 
         return response()->json(['contacts' => $contacts]);
     }
