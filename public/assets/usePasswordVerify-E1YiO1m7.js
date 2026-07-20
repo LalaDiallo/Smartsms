@@ -1,0 +1,1 @@
+import{r as s,v as a}from"./index-BB8iXDkw.js";function n(){const[e,r]=s.useState(!1);return{verify:async t=>{r(!0);try{return await a.post("/auth/verify-password",{password:t}),!0}catch{return!1}finally{r(!1)}},verifying:e}}export{n as u};

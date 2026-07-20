@@ -163,6 +163,18 @@ class SettingController extends Controller
         return response()->json(['message' => 'Mot de passe mis à jour avec succès'], 200);
     }
 
+    public function verifyPassword(Request $request)
+    {
+        $request->validate(['password' => 'required|string']);
+        $user = $this->authUser();
+
+        if (!Hash::check($request->password, $user->password)) {
+            return response()->json(['message' => 'Mot de passe incorrect'], 422);
+        }
+
+        return response()->json(['valid' => true]);
+    }
+
     public function updateTwoFactorAuthentication(Request $request)
     {
         $user = $this->authUser();

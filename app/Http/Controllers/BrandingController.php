@@ -11,6 +11,9 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Barryvdh\DomPDF\Facade\Pdf;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
+use Illuminate\Support\Str;
 
 class BrandingController extends Controller
 {
@@ -173,5 +176,30 @@ class BrandingController extends Controller
         });
 
         return response()->json(['message' => 'Branding activé']);
+    }
+
+    public function downloadPdf(int $id)
+    {
+        $user     = auth()->user();
+        $branding = Branding::where('id', $id)
+            ->where('client_id', $user->client_id)
+            ->where('status', 'approved')
+            ->firstOrFail();
+
+        $ref        = 'BR-' . now()->format('Y') . '-' . str_pad($branding->id, 6, '0', STR_PAD_LEFT);
+        $verifyUrl  = config('app.url') . '/verify/' . hash_hmac('sha256', $ref, config('app.key'));
+        $qrBase64   = base64_encode(QrCode::format('png')->size(120)->generate($verifyUrl));
+        $clientName = $user->client?->company_name ?? $user->client?->name ?? '—';
+
+        $pdf = Pdf::loadView('pdf.branding-certificate', [
+            'branding'   => $branding,
+            'ref'        => $ref,
+            'qrBase64'   => $qrBase64,
+            'clientName' => $clientName,
+        ])->setPaper('a4', 'portrait');
+
+        $filename = 'certificat-branding-' . Str::slug($branding->brand_name) . '-' . now()->format('Ymd') . '.pdf';
+
+        return $pdf->download($filename);
     }
 }

@@ -6,6 +6,8 @@ use App\Models\SenderName;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Barryvdh\DomPDF\Facade\Pdf;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 class SenderNameController extends Controller
 {
@@ -239,5 +241,30 @@ class SenderNameController extends Controller
             'message' => "Sender name \"{$sender->name}\" rejeté.",
             'data'    => $sender,
         ]);
+    }
+
+    public function downloadPdf(int $id)
+    {
+        $user   = Auth::user();
+        $sender = SenderName::where('id', $id)
+            ->where('client_id', $user->client_id)
+            ->where('status', 'approved')
+            ->firstOrFail();
+
+        $ref       = 'SN-' . now()->format('Y') . '-' . str_pad($sender->id, 6, '0', STR_PAD_LEFT);
+        $verifyUrl = config('app.url') . '/verify/' . hash_hmac('sha256', $ref, config('app.key'));
+        $qrBase64  = base64_encode(QrCode::format('png')->size(120)->generate($verifyUrl));
+        $clientName = $user->client?->company_name ?? $user->client?->name ?? '—';
+
+        $pdf = Pdf::loadView('pdf.sender-name-attestation', [
+            'senderName' => $sender,
+            'ref'        => $ref,
+            'qrBase64'   => $qrBase64,
+            'clientName' => $clientName,
+        ])->setPaper('a4', 'portrait');
+
+        $filename = 'attestation-sender-name-' . \Illuminate\Support\Str::slug($sender->name) . '-' . now()->format('Ymd') . '.pdf';
+
+        return $pdf->download($filename);
     }
 }

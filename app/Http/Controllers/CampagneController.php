@@ -29,6 +29,8 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Barryvdh\DomPDF\Facade\Pdf;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 class CampagneController extends Controller
 {
@@ -47,8 +49,7 @@ class CampagneController extends Controller
             return response()->json(['message' => 'Client introuvable'], 404);
         }
 
-        $query = Campagnes::with(['messages'])
-            ->where('client_id', $client->id);
+        $query = Campagnes::where('client_id', $client->id);
 
         if ($user->zone_id) {
             $query->where('zone_id', $user->zone_id);
@@ -447,6 +448,8 @@ class CampagneController extends Controller
             }
         }
 
+        // Phase 1 : Lire et normaliser toutes les lignes du CSV
+        $rows = [];
         while (($row = fgetcsv($handle)) !== false) {
             $data = [
                 'client_id'  => $clientId,
@@ -475,25 +478,76 @@ class CampagneController extends Controller
                 }
             }
 
-            $contact = Contacts::where('client_id', $clientId)
-                ->where(function ($q) use ($data) {
-                    if (!empty($data['phone'])) {
-                        $q->orWhere('phone', $data['phone']);
-                    }
-                    if (!empty($data['email'])) {
-                        $q->orWhere('email', $data['email']);
-                    }
-                })
-                ->first();
-
-            if (!$contact) {
-                $contact = Contacts::create($data);
-            }
-
-            $contacts->push($contact);
+            $rows[] = $data;
         }
 
         fclose($handle);
+
+        if (empty($rows)) {
+            return collect();
+        }
+
+        // Phase 2 : Charger les doublons existants en une seule requête
+        $phones = array_values(array_filter(array_column($rows, 'phone')));
+        $emails = array_values(array_filter(array_column($rows, 'email')));
+
+        $existingByPhone = [];
+        $existingByEmail = [];
+
+        if ($phones || $emails) {
+            $existing = Contacts::where('client_id', $clientId)
+                ->where(function ($q) use ($phones, $emails) {
+                    if ($phones) $q->orWhereIn('phone', $phones);
+                    if ($emails) $q->orWhereIn('email', $emails);
+                })
+                ->get();
+
+            foreach ($existing as $c) {
+                if ($c->phone) $existingByPhone[$c->phone] = $c;
+                if ($c->email) $existingByEmail[$c->email] = $c;
+            }
+        }
+
+        // Phase 3 : Séparer nouveaux et existants
+        $toInsert = [];
+        $now      = now()->toDateTimeString();
+
+        foreach ($rows as $data) {
+            $found = null;
+            if (!empty($data['phone']) && isset($existingByPhone[$data['phone']])) {
+                $found = $existingByPhone[$data['phone']];
+            } elseif (!empty($data['email']) && isset($existingByEmail[$data['email']])) {
+                $found = $existingByEmail[$data['email']];
+            }
+
+            if ($found) {
+                $contacts->push($found);
+            } else {
+                $data['created_at'] = $now;
+                $data['updated_at'] = $now;
+                $toInsert[]         = $data;
+            }
+        }
+
+        // Phase 4 : Insérer en batch (chunks de 500 pour éviter les limites MySQL)
+        foreach (array_chunk($toInsert, 500) as $chunk) {
+            Contacts::insert($chunk);
+        }
+
+        // Phase 5 : Recharger les contacts nouvellement insérés
+        if (!empty($toInsert)) {
+            $newPhones = array_values(array_filter(array_column($toInsert, 'phone')));
+            $newEmails = array_values(array_filter(array_column($toInsert, 'email')));
+
+            $newContacts = Contacts::where('client_id', $clientId)
+                ->where(function ($q) use ($newPhones, $newEmails) {
+                    if ($newPhones) $q->orWhereIn('phone', $newPhones);
+                    if ($newEmails) $q->orWhereIn('email', $newEmails);
+                })
+                ->get();
+
+            $contacts = $contacts->merge($newContacts);
+        }
 
         return $contacts;
     }
@@ -780,28 +834,31 @@ class CampagneController extends Controller
             $campaign = Campagnes::where('id', $id)
                 ->where('client_id', $user->client_id)
                 ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
-                ->with(['messages'])
                 ->firstOrFail();
 
-            $messages   = $campaign->messages;
-            $total      = $messages->count();
-            $messageIds = $messages->pluck('id');
+            // Agrégats SQL — évite de charger tous les messages en mémoire PHP
+            $msgStats = Messages::where('campagnes_id', $campaign->id)
+                ->selectRaw('
+                    COUNT(*) as total,
+                    SUM(status IN ("sent","delivered")) as sent,
+                    SUM(status = "delivered") as delivered,
+                    SUM(status = "failed") as failed,
+                    SUM(status IN ("queued","scheduled","pending")) as pending
+                ')
+                ->first();
 
-            $byStatus = $messages->groupBy('status')->map->count();
-
-            $sent      = $byStatus->get('sent', 0) + $byStatus->get('delivered', 0);
-            $delivered = $byStatus->get('delivered', 0);
-            $failed    = $byStatus->get('failed', 0);
-            $pending   = $byStatus->get('queued', 0)
-                       + $byStatus->get('scheduled', 0)
-                       + $byStatus->get('pending', 0);
+            $total     = (int) ($msgStats->total     ?? 0);
+            $sent      = (int) ($msgStats->sent      ?? 0);
+            $delivered = (int) ($msgStats->delivered ?? 0);
+            $failed    = (int) ($msgStats->failed    ?? 0);
+            $pending   = (int) ($msgStats->pending   ?? 0);
 
             $deliveryRate = $total > 0 ? round(($delivered / $total) * 100, 1) : 0;
-            $failRate     = $total > 0 ? round(($failed  / $total) * 100, 1) : 0;
+            $failRate     = $total > 0 ? round(($failed    / $total) * 100, 1) : 0;
 
             // ── Réponses réelles ──────────────────────────────────────────────
             $responsesCount = DB::table('responses')
-                ->whereIn('message_id', $messageIds)
+                ->whereIn('message_id', fn ($q) => $q->select('id')->from('messages')->where('campagnes_id', $campaign->id))
                 ->count();
 
             $replyRate = $sent > 0 ? round(($responsesCount / $sent) * 100, 1) : 0;
@@ -809,14 +866,14 @@ class CampagneController extends Controller
             // Réponses par canal (jointure avec messages)
             $responsesByChannel = DB::table('responses')
                 ->join('messages', 'responses.message_id', '=', 'messages.id')
-                ->whereIn('responses.message_id', $messageIds)
+                ->where('messages.campagnes_id', $campaign->id)
                 ->selectRaw('messages.channel, COUNT(responses.id) as total')
                 ->groupBy('messages.channel')
                 ->pluck('total', 'channel');
 
             // Réponses par jour
             $responsesByDay = DB::table('responses')
-                ->whereIn('message_id', $messageIds)
+                ->whereIn('message_id', fn ($q) => $q->select('id')->from('messages')->where('campagnes_id', $campaign->id))
                 ->selectRaw('DATE(received_at) as date, COUNT(*) as total')
                 ->groupBy('date')
                 ->orderBy('date')
@@ -826,7 +883,7 @@ class CampagneController extends Controller
             $recentResponses = DB::table('responses')
                 ->join('messages', 'responses.message_id', '=', 'messages.id')
                 ->leftJoin('contacts', 'responses.contact_id', '=', 'contacts.id')
-                ->whereIn('responses.message_id', $messageIds)
+                ->where('messages.campagnes_id', $campaign->id)
                 ->selectRaw('
                     responses.id,
                     responses.content,
@@ -852,7 +909,7 @@ class CampagneController extends Controller
                     ],
                 ]);
 
-            // ── Stats par canal ───────────────────────────────────────────────
+            // ── Stats par canal (SQL) ─────────────────────────────────────────
             $channelColors = [
                 'sms'      => '#3B82F6',
                 'email'    => '#10B981',
@@ -860,29 +917,39 @@ class CampagneController extends Controller
                 'push'     => '#F59E0B',
             ];
 
-            $byChannel = $messages->groupBy('channel')->map(function ($channelMsgs, $channel) use ($total, $channelColors, $responsesByChannel, $sent) {
-                $st        = $channelMsgs->groupBy('status')->map->count();
-                $chTotal   = $channelMsgs->count();
-                $chSent    = $st->get('sent', 0) + $st->get('delivered', 0);
-                $chFailed  = $st->get('failed', 0);
-                $chPending = $st->get('queued', 0) + $st->get('scheduled', 0) + $st->get('pending', 0);
-                $chReplies = (int) ($responsesByChannel[$channel] ?? 0);
+            $byChannel = Messages::where('campagnes_id', $campaign->id)
+                ->selectRaw('
+                    channel,
+                    COUNT(*) as total,
+                    SUM(status IN ("sent","delivered")) as sent,
+                    SUM(status = "delivered") as delivered,
+                    SUM(status = "failed") as failed,
+                    SUM(status IN ("queued","scheduled","pending")) as pending
+                ')
+                ->groupBy('channel')
+                ->get()
+                ->map(function ($row) use ($total, $channelColors, $responsesByChannel) {
+                    $chTotal   = (int) $row->total;
+                    $chSent    = (int) $row->sent;
+                    $chFailed  = (int) $row->failed;
+                    $chPending = (int) $row->pending;
+                    $chReplies = (int) ($responsesByChannel[$row->channel] ?? 0);
 
-                return [
-                    'name'         => ucfirst($channel),
-                    'channel'      => $channel,
-                    'total'        => $chTotal,
-                    'sent'         => $chSent,
-                    'delivered'    => $st->get('delivered', 0),
-                    'failed'       => $chFailed,
-                    'pending'      => $chPending,
-                    'responses'    => $chReplies,
-                    'reply_rate'   => $chSent > 0 ? round(($chReplies / $chSent) * 100, 1) : 0,
-                    'value'        => $total > 0 ? round(($chTotal / $total) * 100, 1) : 0,
-                    'fail_rate'    => $chTotal > 0 ? round(($chFailed  / $chTotal) * 100, 1) : 0,
-                    'color'        => $channelColors[$channel] ?? '#6B7280',
-                ];
-            })->values();
+                    return [
+                        'name'         => ucfirst($row->channel),
+                        'channel'      => $row->channel,
+                        'total'        => $chTotal,
+                        'sent'         => $chSent,
+                        'delivered'    => (int) $row->delivered,
+                        'failed'       => $chFailed,
+                        'pending'      => $chPending,
+                        'responses'    => $chReplies,
+                        'reply_rate'   => $chSent > 0 ? round(($chReplies / $chSent) * 100, 1) : 0,
+                        'value'        => $total > 0 ? round(($chTotal / $total) * 100, 1) : 0,
+                        'fail_rate'    => $chTotal > 0 ? round(($chFailed  / $chTotal) * 100, 1) : 0,
+                        'color'        => $channelColors[$row->channel] ?? '#6B7280',
+                    ];
+                })->values();
 
             // ── Évolution quotidienne ─────────────────────────────────────────
             $trend = Messages::where('campagnes_id', $campaign->id)
@@ -979,6 +1046,109 @@ class CampagneController extends Controller
         }
     }
 
+    public function downloadPdf(int $id)
+    {
+        $user = Auth::user();
+
+        $campaign = Campagnes::where('id', $id)
+            ->where('client_id', $user->client_id)
+            ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
+            ->with(['messages'])
+            ->firstOrFail();
+
+        $messages   = $campaign->messages;
+        $total      = $messages->count();
+        $messageIds = $messages->pluck('id');
+        $byStatus   = $messages->groupBy('status')->map->count();
+
+        $sent      = $byStatus->get('sent', 0) + $byStatus->get('delivered', 0);
+        $delivered = $byStatus->get('delivered', 0);
+        $failed    = $byStatus->get('failed', 0);
+        $pending   = $byStatus->get('queued', 0) + $byStatus->get('scheduled', 0) + $byStatus->get('pending', 0);
+
+        $responsesCount = DB::table('responses')->whereIn('message_id', $messageIds)->count();
+        $deliveryRate   = $total > 0 ? round(($delivered / $total) * 100, 1) : 0;
+        $replyRate      = $sent  > 0 ? round(($responsesCount / $sent) * 100, 1) : 0;
+
+        $responsesByChannel = DB::table('responses')
+            ->join('messages', 'responses.message_id', '=', 'messages.id')
+            ->whereIn('responses.message_id', $messageIds)
+            ->selectRaw('messages.channel, COUNT(responses.id) as total')
+            ->groupBy('messages.channel')
+            ->pluck('total', 'channel');
+
+        $byChannel = $messages->groupBy('channel')->map(function ($channelMsgs, $channel) use ($total, $responsesByChannel) {
+            $st      = $channelMsgs->groupBy('status')->map->count();
+            $chTotal = $channelMsgs->count();
+            $chSent  = $st->get('sent', 0) + $st->get('delivered', 0);
+            return [
+                'name'       => ucfirst($channel),
+                'total'      => $chTotal,
+                'sent'       => $chSent,
+                'delivered'  => $st->get('delivered', 0),
+                'failed'     => $st->get('failed', 0),
+                'responses'  => (int) ($responsesByChannel[$channel] ?? 0),
+                'reply_rate' => $chSent > 0 ? round(((int) ($responsesByChannel[$channel] ?? 0) / $chSent) * 100, 1) : 0,
+            ];
+        })->values();
+
+        $responsesByDay = DB::table('responses')
+            ->whereIn('message_id', $messageIds)
+            ->selectRaw('DATE(received_at) as date, COUNT(*) as total')
+            ->groupBy('date')->orderBy('date')
+            ->pluck('total', 'date');
+
+        $trend = Messages::where('campagnes_id', $campaign->id)
+            ->whereNotNull('sent_at')
+            ->selectRaw('DATE(sent_at) as date, COUNT(*) as total,
+                SUM(status="delivered") as delivered,
+                SUM(status="sent")      as sent,
+                SUM(status="failed")    as failed,
+                SUM(status="pending")   as pending')
+            ->groupBy('date')->orderBy('date')
+            ->get()
+            ->map(fn ($r) => [
+                'date'      => $r->date,
+                'total'     => (int) $r->total,
+                'sent'      => (int) $r->sent,
+                'delivered' => (int) $r->delivered,
+                'failed'    => (int) $r->failed,
+                'responses' => (int) ($responsesByDay[$r->date] ?? 0),
+            ]);
+
+        // ── Référence unique et QR Code ───────────────────────────────────
+        $ref       = 'SMS-' . now()->format('Y') . '-' . str_pad($campaign->id, 6, '0', STR_PAD_LEFT);
+        $verifyUrl = config('app.url') . '/verify/' . hash_hmac('sha256', $ref, config('app.key'));
+        $qrPng     = QrCode::format('png')->size(120)->generate($verifyUrl);
+        $qrBase64  = base64_encode($qrPng);
+
+        $clientName = $user->client?->company_name ?? $user->client?->name ?? '—';
+
+        $pdf = Pdf::loadView('pdf.campaign-report', [
+            'campaign'   => $campaign,
+            'stats'      => [
+                'total'         => $total,
+                'sent'          => $sent,
+                'delivered'     => $delivered,
+                'failed'        => $failed,
+                'pending'       => $pending,
+                'responses'     => $responsesCount,
+                'delivery_rate' => $deliveryRate,
+                'reply_rate'    => $replyRate,
+            ],
+            'byChannel'  => $byChannel,
+            'trend'      => $trend,
+            'ref'        => $ref,
+            'qrBase64'   => $qrBase64,
+            'verifyUrl'  => $verifyUrl,
+            'clientName' => $clientName,
+        ])->setPaper('a4', 'portrait');
+
+        $filename = 'rapport-campagne-' . Str::slug($campaign->name) . '-' . now()->format('Ymd') . '.pdf';
+
+        return $pdf->download($filename);
+    }
+
     public function globalAnalytics(Request $request)
     {
         try {
@@ -1036,8 +1206,9 @@ class CampagneController extends Controller
             $deliveryRate = $total > 0 ? round(($delivered / $total) * 100, 1) : 0;
             $failRate     = $total > 0 ? round(($failed    / $total) * 100, 1) : 0;
 
-            $messageIds     = Messages::whereIn('campagnes_id', $campaignIds)->pluck('id');
-            $totalResponses = DB::table('responses')->whereIn('message_id', $messageIds)->count();
+            $totalResponses = DB::table('responses')
+                ->whereIn('message_id', fn ($q) => $q->select('id')->from('messages')->whereIn('campagnes_id', $campaignIds))
+                ->count();
             $replyRate      = $sent > 0 ? round(($totalResponses / $sent) * 100, 1) : 0;
 
             // ── Stats par canal ───────────────────────────────────────────────
