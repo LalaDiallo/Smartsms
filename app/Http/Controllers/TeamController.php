@@ -425,8 +425,16 @@ class TeamController extends Controller
 
         $labels = PermissionHelper::getPermissionLabels();
 
+        // Précharger tous les compteurs en une seule requête GROUP BY
+        $memberCounts = DB::table('users')
+            ->where('client_id', $auth->client_id)
+            ->whereIn('role', $roles->pluck('role'))
+            ->selectRaw('role, COUNT(*) as cnt')
+            ->groupBy('role')
+            ->pluck('cnt', 'role');
+
         // Construire le retour pour chaque rôle
-        $rolesWithMembers = $roles->map(function ($role) use ($roleDetails, $auth, $labels) {
+        $rolesWithMembers = $roles->map(function ($role) use ($roleDetails, $auth, $labels, $memberCounts) {
             // Récupérer les permissions activées (true)
             $permissions = collect($role)
                 ->except(['id', 'role', 'created_at', 'updated_at'])
@@ -435,11 +443,7 @@ class TeamController extends Controller
                 ->map(fn($perm) => $labels[$perm] ?? $perm)
                 ->toArray();
 
-            // Compter les utilisateurs liés à ce rôle pour le même client
-            $memberCount = DB::table('users')
-                ->where('role', $role->role)
-                ->where('client_id', $auth->client_id)
-                ->count();
+            $memberCount = $memberCounts[$role->role] ?? 0;
 
             // Détails personnalisés ou défaut
             $defaultRoleDetails = [

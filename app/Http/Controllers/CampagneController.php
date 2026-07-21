@@ -626,6 +626,7 @@ class CampagneController extends Controller
 
         $contacts = Contacts::where('client_id', $client->id)
             ->where('status', '!=', 'NotInsert')
+            ->limit(500)
             ->get(['id', 'first_name', 'last_name', 'phone', 'email']);
 
         return response()->json([
@@ -1467,7 +1468,8 @@ class CampagneController extends Controller
     {
         try {
             $user = auth()->user();
-            $campaign = Campagnes::where('id', $id)
+            $campaign = Campagnes::with(['user.client'])
+                ->where('id', $id)
                 ->where('client_id', $user->client_id)
                 ->when($user->zone_id, fn ($q) => $q->where('zone_id', $user->zone_id))
                 ->firstOrFail();
@@ -1657,7 +1659,12 @@ class CampagneController extends Controller
                 return response()->json(['error' => 'Cette campagne est déjà terminée'], 403);
             }
 
-            $hasMessages = Messages::where('campagnes_id', $campaign->id)->exists();
+            // Comptage en une requête : total + quota-eligible (en_file / programme)
+            $msgAgg = Messages::where('campagnes_id', $campaign->id)
+                ->selectRaw("COUNT(*) as total, SUM(status IN ('en_file','programme')) as queued")
+                ->first();
+            $hasMessages  = ($msgAgg->total ?? 0) > 0;
+            $messageCount = (int) ($msgAgg->queued ?? 0);
 
             // ── Push sans messages (brouillon) : envoi direct via PushService ─
             if (!$hasMessages && $campaign->channel === 'push') {
@@ -1701,9 +1708,7 @@ class CampagneController extends Controller
             }
 
             // ── Vérification du quota SMS avant envoi ────────────────────────
-            $messageCount = Messages::where('campagnes_id', $campaign->id)
-                ->whereIn('status', ['en_file', 'programme'])
-                ->count();
+            // $messageCount already computed above via the merged aggregate query
 
             $subscription = Subscription::where('client_id', $user->client_id)
                 ->where('status', 'active')

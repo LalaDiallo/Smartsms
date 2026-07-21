@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Validator;
 use App\Notifications\CustomResetPassword;
 use Illuminate\Support\Facades\Mail;
 use App\Mail\LoginOtpMail;
+use App\Services\OrangeSmsService;
 
 class LoginController extends Controller
 {
@@ -83,16 +84,46 @@ class LoginController extends Controller
         $code = rand(100000, 999999);
 
         OtpCode::create([
-            'user_id' => $user->id,
-            'code' => $code,
+            'user_id'    => $user->id,
+            'code'       => $code,
             'expires_at' => now()->addMinutes(5),
         ]);
 
-        Mail::to($user->email)->send(new LoginOtpMail($code));
+        $mailSent = false;
+        $smsSent  = false;
+
+        // Envoi par email
+        try {
+            Mail::to($user->email)->send(new LoginOtpMail($code));
+            $mailSent = true;
+        } catch (\Throwable $e) {
+            Log::warning('OTP mail échoué', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+        }
+
+        // Envoi par SMS si le user a un numéro de téléphone
+        if ($user->phone) {
+            try {
+                (new OrangeSmsService())->send(
+                    $user->phone,
+                    "Votre code de connexion SmartSMS : {$code}\nValable 5 minutes."
+                );
+                $smsSent = true;
+            } catch (\Throwable $e) {
+                Log::warning('OTP SMS échoué', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+            }
+        }
+
+        // Si aucun canal n'a fonctionné → erreur claire
+        if (!$mailSent && !$smsSent) {
+            return response()->json([
+                'message' => 'Impossible d\'envoyer le code OTP. Veuillez réessayer dans quelques instants.',
+            ], 503);
+        }
 
         return response()->json([
             'requires_otp' => true,
-            'user_id' => $user->id,
+            'user_id'      => $user->id,
+            'sent_via'     => array_filter(['email' => $mailSent, 'sms' => $smsSent]),
         ]);
     }
 

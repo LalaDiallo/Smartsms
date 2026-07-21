@@ -1,0 +1,1 @@
+import{r as s}from"./vendor-react-Dv5X9Ekc.js";import{l as a}from"./index-DSSlCDtp.js";function n(){const[t,r]=s.useState(!1);return{verify:async e=>{r(!0);try{return await a.post("/auth/verify-password",{password:e}),!0}catch{return!1}finally{r(!1)}},verifying:t}}export{n as u};

@@ -461,23 +461,24 @@ class ContactController extends Controller
             $query->whereIn('id', $ids);
         }
 
-        $contacts = $query->get(['first_name', 'last_name', 'email', 'phone', 'region', 'status']);
-
-        $csv  = "Prénom,Nom,Email,Téléphone,Région,Statut\n";
-        foreach ($contacts as $contact) {
-            $csv .= implode(',', array_map([$this, 'csvField'], [
-                $contact->first_name,
-                $contact->last_name,
-                $contact->email  ?? '',
-                $contact->phone  ?? '',
-                $contact->region ?? '',
-                $contact->status,
-            ])) . "\n";
-        }
-
         $filename = 'contacts_' . now()->format('Ymd_His') . '.csv';
+        $self     = $this;
 
-        return Response::make($csv, 200, [
+        return Response::stream(function () use ($query, $self) {
+            echo "Prénom,Nom,Email,Téléphone,Région,Statut\n";
+            $query->chunk(500, function ($batch) use ($self) {
+                foreach ($batch as $contact) {
+                    echo implode(',', array_map([$self, 'csvField'], [
+                        $contact->first_name,
+                        $contact->last_name,
+                        $contact->email  ?? '',
+                        $contact->phone  ?? '',
+                        $contact->region ?? '',
+                        $contact->status,
+                    ])) . "\n";
+                }
+            });
+        }, 200, [
             'Content-Type'        => 'text/csv; charset=UTF-8',
             'Content-Disposition' => "attachment; filename=\"{$filename}\"",
         ]);

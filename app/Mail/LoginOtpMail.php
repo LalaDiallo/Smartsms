@@ -26,7 +26,7 @@ class LoginOtpMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Login Otp Mail',
+            subject: 'Votre code de connexion SmartSMS',
         );
     }
 

@@ -184,14 +184,17 @@ class DashController extends Controller
         $pendingBrandings   = Branding::where('status', 'pending')->count();
 
         // ── Messages plateforme ───────────────────────────────────────────────
-        $totalMessagesSent   = Messages::whereIn('status', ['sent', 'delivered'])->count();
-        $messagesThisMonth   = Messages::whereIn('status', ['sent', 'delivered'])
-            ->whereMonth('created_at', now()->month)
-            ->whereYear('created_at', now()->year)
+        $thisMonthStart = now()->startOfMonth();
+        $thisMonthEnd   = now()->endOfMonth();
+        $lastMonthStart = now()->subMonthNoOverflow()->startOfMonth();
+        $lastMonthEnd   = now()->subMonthNoOverflow()->endOfMonth();
+
+        $totalMessagesSent = Messages::whereIn('status', ['sent', 'delivered'])->count();
+        $messagesThisMonth = Messages::whereIn('status', ['sent', 'delivered'])
+            ->whereBetween('created_at', [$thisMonthStart, $thisMonthEnd])
             ->count();
-        $messagesLastMonth   = Messages::whereIn('status', ['sent', 'delivered'])
-            ->whereMonth('created_at', now()->subMonth()->month)
-            ->whereYear('created_at', now()->subMonth()->year)
+        $messagesLastMonth = Messages::whereIn('status', ['sent', 'delivered'])
+            ->whereBetween('created_at', [$lastMonthStart, $lastMonthEnd])
             ->count();
 
         // ── Utilisateurs plateforme ───────────────────────────────────────────
@@ -221,11 +224,12 @@ class DashController extends Controller
             ->get(['id', 'company_name', 'contact_name', 'email', 'status', 'created_at', 'industry']);
 
         // ── Distribution abonnements par plan ─────────────────────────────────
-        $subsByPlan = Subscription::where('status', 'active')
-            ->with('plan:id,name,slug')
-            ->get()
-            ->groupBy(fn($s) => $s->plan?->name ?? 'Inconnu')
-            ->map->count();
+        $subsByPlan = DB::table('subscriptions')
+            ->join('subscription_plans', 'subscriptions.subscription_plan_id', '=', 'subscription_plans.id')
+            ->where('subscriptions.status', 'active')
+            ->selectRaw('subscription_plans.name, COUNT(*) as cnt')
+            ->groupBy('subscription_plans.name')
+            ->pluck('cnt', 'name');
 
         // ── Sender names en attente ───────────────────────────────────────────
         $pendingSenderNamesList = SenderName::where('status', 'pending')
