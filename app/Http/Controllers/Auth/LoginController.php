@@ -113,8 +113,13 @@ class LoginController extends Controller
             }
         }
 
-        // Si aucun canal n'a fonctionné → erreur claire
-        if (!$mailSent && !$smsSent) {
+        // En local : toujours logger le code pour pouvoir se connecter sans SMTP ni Orange
+        if (app()->environment('local')) {
+            Log::info("OTP local [{$user->email}] : {$code}");
+        }
+
+        // Si aucun canal n'a fonctionné → erreur claire (sauf en local où le log suffit)
+        if (!$mailSent && !$smsSent && !app()->environment('local')) {
             return response()->json([
                 'message' => 'Impossible d\'envoyer le code OTP. Veuillez réessayer dans quelques instants.',
             ], 503);
